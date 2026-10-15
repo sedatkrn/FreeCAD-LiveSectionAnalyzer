@@ -13,7 +13,7 @@ Own dock window, so the Tasks panel stays free for the Measure tool
 Freeze Section stores the view as real, independent FreeCAD objects
 
 Repository: https://github.com/sedatkrn/FreeCAD-LiveSectionAnalyzer
-Latest release: v0.5.0
+Latest release: v0.6.0
 License: MIT
 Tested with FreeCAD 1.1.x and 27.1 dev on Linux; announced and tested by users on the FreeCAD forum.
 The repository has a package.xml, a LICENSE file, README (EN/TR), CHANGELOG and unit tests for the numeric core.

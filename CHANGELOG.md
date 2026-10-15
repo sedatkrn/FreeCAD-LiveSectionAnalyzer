@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.6.0 – 2026-10-15
 
 - The plane gizmo is grabbed only by its arrow (`GIZMO_PICK_PLANE = False`); faces under the plane can be selected again.
 - GPU clipping no longer swaps the sectioned objects for `Live_Section_Background` copies: the originals stay visible and selectable (e.g. for Assembly joints). Copies are only used for the boolean cut.
