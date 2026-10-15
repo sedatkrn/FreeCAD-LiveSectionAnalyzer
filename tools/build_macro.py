@@ -19,6 +19,7 @@ PARTS = [
     "header.py",      # docstring, imports, settings
     "mesh_core.py",   # pure numpy section core (tests/test_mesh_core.py)
     "branding.py",    # VERSION and the embedded icon
+    "toolbar.py",     # "Add to toolbar" button support
     "gizmo.py",       # 3D plane gizmo and its event filter
     "widgets.py",     # collapsible section, task panel adapter
     "targets.py",     # scene observer, listed objects

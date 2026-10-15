@@ -1,5 +1,10 @@
 # Changelog
 
+## Unreleased
+
+- **Add to toolbar** button in the panel header: registers the macro as a command with its icon on a global *Live Section* toolbar (all workbenches) and assigns **Shift+S** when free. Pressing it again removes the toolbar.
+- Source split into parts under `src/`; `tools/build_macro.py` builds the single-file macro (no change for users).
+
 ## 0.6.0 – 2026-10-15
 
 - The plane gizmo is grabbed only by its arrow (`GIZMO_PICK_PLANE = False`); faces under the plane can be selected again.

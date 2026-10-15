@@ -19,6 +19,11 @@ class _PanelMixin:
             "<span style='color: #777; font-size: 10px;'>FreeCAD clipping macro  v%s</span>" % VERSION
         )
         header.addWidget(title, 1)
+        self.btn_toolbar = QToolButton()
+        self.btn_toolbar.setAutoRaise(True)
+        self.btn_toolbar.clicked.connect(self.toggle_toolbar)
+        self._sync_toolbar_button()
+        header.addWidget(self.btn_toolbar)
         root.addLayout(header)
 
         def section(title, expanded=True):
@@ -333,6 +338,30 @@ class _PanelMixin:
         self.btn_close.clicked.connect(self.close)
         panel_layout.addWidget(self.btn_close)
         self.panel = panel
+
+    def _sync_toolbar_button(self):
+        try:
+            on = toolbar_installed()
+        except Exception:
+            on = False
+        self.btn_toolbar.setText("Remove button" if on else "Add to toolbar")
+        self.btn_toolbar.setToolTip(
+            f"Remove the '{TOOLBAR_NAME}' toolbar" if on else
+            f"Add a '{TOOLBAR_NAME}' toolbar with a button for this macro (all workbenches, "
+            f"shortcut {TOOLBAR_SHORTCUT} if free)")
+
+    def toggle_toolbar(self):
+        try:
+            if toolbar_installed():
+                uninstall_toolbar()
+                App.Console.PrintMessage(f"Live Section: '{TOOLBAR_NAME}' toolbar removed.\n")
+            else:
+                cmd, key = install_toolbar()
+                note = f", shortcut {key}" if key else f" ({TOOLBAR_SHORTCUT} is taken, no shortcut)"
+                App.Console.PrintMessage(f"Live Section: '{TOOLBAR_NAME}' toolbar added{note}.\n")
+        except Exception as e:
+            QMessageBox.warning(None, "Live Section", f"Could not change the toolbar: {e}")
+        self._sync_toolbar_button()
 
     def show_panel(self):
         """Show the options in the Tasks panel (default) or as a dock window."""
