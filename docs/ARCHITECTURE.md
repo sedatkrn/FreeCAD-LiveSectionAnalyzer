@@ -3,7 +3,19 @@
 Users get one file, `macro/LiveSectionAnalyzer.FCMacro`. It is built from the parts in `src/` by
 `tools/build_macro.py`, which pastes them one after another (one shared namespace, order set in
 `PARTS`): `header.py` (imports, settings), `mesh_core.py`, `branding.py`, `gizmo.py`, `widgets.py`,
-`targets.py`, `analyzer.py`, `run.py`. Edit `src/`, then rebuild; `--check` fails when the macro is stale.
+`targets.py`, then the mixins of the main class, then `analyzer.py` and `run.py`. Edit `src/`, then
+rebuild; `--check` fails when the macro is stale.
+
+`LiveSectionAnalyzer` is assembled from mixins, one per file:
+
+| File | Class | Contents |
+|---|---|---|
+| `scene.py` | `_SceneMixin` | collecting the objects, global shapes, following moved parts |
+| `panel.py` | `_PanelMixin` | options panel, event handlers, gizmo callbacks, styles |
+| `geometry.py` | `_GeometryMixin` | plane, GPU clip, boolean cut, exact slice and hatch |
+| `mesh_section.py` | `_MeshSectionMixin` | mesh-based section as Coin nodes |
+| `freeze.py` | `_FreezeMixin` | Freeze Section |
+| `analyzer.py` | `LiveSectionAnalyzer` | `__init__`, document features, `update_section()`, cleanup |
 
 ## Classes
 
