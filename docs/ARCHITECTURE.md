@@ -1,6 +1,9 @@
 # Architecture
 
-Everything lives in `macro/LiveSectionAnalyzer.FCMacro`.
+Users get one file, `macro/LiveSectionAnalyzer.FCMacro`. It is built from the parts in `src/` by
+`tools/build_macro.py`, which pastes them one after another (one shared namespace, order set in
+`PARTS`): `header.py` (imports, settings), `mesh_core.py`, `branding.py`, `gizmo.py`, `widgets.py`,
+`targets.py`, `analyzer.py`, `run.py`. Edit `src/`, then rebuild; `--check` fails when the macro is stale.
 
 ## Classes
 

@@ -9,6 +9,8 @@ Author: Sedat Kuran
 License: MIT (see LICENSE)
 Repository: https://github.com/sedatkrn/FreeCAD-LiveSectionAnalyzer
 Copyright (c) 2026 Sedat Kuran
+
+This file is generated from src/ by tools/build_macro.py; edit the files there.
 """
 
 import FreeCAD as App
