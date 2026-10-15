@@ -62,6 +62,15 @@ class PlaneGizmo:
         # so the gizmo itself is never clipped
         self.sg.insertChild(self.root, 0)
 
+        # keep the handles at a constant screen size while zooming
+        self.k = 1.0
+        self._scale_timer = QTimer()
+        self._scale_timer.setInterval(50)
+        self._scale_timer.timeout.connect(self._rescale)
+        if GIZMO_SCREEN_PX > 0:
+            self._rescale()
+            self._scale_timer.start()
+
         self._filter = _GizmoEventFilter(self)
         self.widget.installEventFilter(self._filter)
 
@@ -85,6 +94,7 @@ class PlaneGizmo:
         head_r = L * 0.11
         head_h = L * 0.26
         self.reach = L + head_h
+        self._head_h = head_h
 
         # SoAnnotation renders after the scene with depth test off, so the gizmo
         # stays visible even behind semi-transparent geometry
@@ -137,7 +147,7 @@ class PlaneGizmo:
         rings.addChild(rlm)
         self.rtf = coin.SoTransform()
         rings.addChild(self.rtf)
-        self.ring_col, self.ring_coords, self.ring_handle = [], [], []
+        self.ring_col, self.ring_coords, self.ring_handle, self.ring_ball = [], [], [], []
         for k in range(2):
             sep = coin.SoSeparator()
             rings.addChild(sep)
@@ -160,6 +170,7 @@ class PlaneGizmo:
             self.ring_col.append(col)
             self.ring_coords.append(co)
             self.ring_handle.append(ht)
+            self.ring_ball.append(ball)
 
         # arrow, drawn on top of everything
         arrow = coin.SoSeparator()
@@ -167,6 +178,8 @@ class PlaneGizmo:
         depth = coin.SoDepthBuffer()
         depth.test.setValue(False)
         arrow.addChild(depth)
+        self.arrow_scale = coin.SoScale()
+        arrow.addChild(self.arrow_scale)
         arrow.addChild(self.color)
 
         shaft = coin.SoCylinder()
@@ -186,6 +199,31 @@ class PlaneGizmo:
             cone.height.setValue(head_h)
             sep.addChild(cone)
             arrow.addChild(sep)
+
+    def _apply_scale(self, k):
+        """Scale arrow and rotation handles by k (the plane outline is not scaled)."""
+        L = self.size
+        self.k = k
+        self.arrow_scale.scaleFactor.setValue(k, k, k)
+        self.reach = (L + self._head_h) * k
+        self.ring_rs = (L * k, L * k)
+        for ball in self.ring_ball:
+            ball.radius.setValue(L * 0.06 * k)
+        self._update_rings()
+
+    def _rescale(self):
+        """Keep the arrow GIZMO_SCREEN_PX pixels long (half length) at the plane origin."""
+        if self._removed or GIZMO_SCREEN_PX <= 0:
+            return
+        try:
+            h = max(self.widget.height(), 1) * max(self._squeeze(), 1e-3)
+            o = self.origin
+            world = self._volume().getWorldToScreenScale(coin.SbVec3f(o.x, o.y, o.z), GIZMO_SCREEN_PX / h)
+            k = world / max(self.size, 1e-9)
+        except Exception:
+            return
+        if k > 0 and abs(k - self.k) > 0.01 * self.k:
+            self._apply_scale(k)
 
     def set_extents(self, half_u, half_w):
         self.half_u, self.half_w = half_u, half_w
@@ -487,6 +525,10 @@ class PlaneGizmo:
             return
         self._removed = True
         self.dragging = False
+        try:
+            self._scale_timer.stop()
+        except Exception:
+            pass
         try:
             self.widget.removeEventFilter(self._filter)
         except Exception:

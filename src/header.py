@@ -66,6 +66,11 @@ MAX_HATCH_LINES = 1500
 # it grabs clicks you cannot select faces under it (e.g. for Assembly joints).
 GIZMO_PICK_PLANE = False
 
+# The gizmo arrow and rotation handles keep this size on screen (half the arrow
+# length, in pixels) while you zoom; the plane outline still follows the model.
+# 0 = everything scales with the model, as before 0.7.
+GIZMO_SCREEN_PX = 110
+
 # Follow parts that move (Assembly solver, dragging, placement edits). After the
 # last change the fine section is rebuilt once the scene has been still this long.
 FOLLOW_SCENE = True
