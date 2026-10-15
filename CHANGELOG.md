@@ -1,5 +1,11 @@
 # Changelog
 
+## Unreleased
+
+- The plane gizmo is grabbed only by its arrow (`GIZMO_PICK_PLANE = False`); faces under the plane can be selected again.
+- GPU clipping no longer swaps the sectioned objects for `Live_Section_Background` copies: the originals stay visible and selectable (e.g. for Assembly joints). Copies are only used for the boolean cut.
+- The section follows moving parts (Assembly solver, placement edits): moved meshes are transformed instead of re-tessellated; changed shapes are rebuilt. `FOLLOW_SCENE`, `SCENE_SETTLE_MS`.
+
 ## 0.5.2 – 2026-10-13
 
 - Tilted section plane: red and blue rotation rings on the gizmo (drag to tilt) and two angle spin boxes (rotation about the plane's in-plane axes) plus Reset; works with mesh and exact engines, hatch, cut solid and freeze. Offset is measured along the tilted normal.
