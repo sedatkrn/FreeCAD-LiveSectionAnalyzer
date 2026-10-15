@@ -1212,71 +1212,8 @@ class _Target:
         self.src = None             # (top object, subname) when picked from the selection
 
 
-class LiveSectionAnalyzer(QDockWidget):
-    def __init__(self):
-        super().__init__()
-        self.setWindowTitle("Interactive Section Analysis")
-        self.setAllowedAreas(Qt.LeftDockWidgetArea | Qt.RightDockWidgetArea)
-
-        self._closed = False
-        self._mode = None             # "task" or "dock"
-        self.panel = None
-        self.targets = []             # all listed objects (checked = sectioned)
-        self.section_feat = None
-        self.edge_feat = None
-        self.hatch_feat = None
-        self.frozen_group = None
-        self.clip = None
-        self.clip_parent = None
-        self.clip_ok = False
-        self.preview = None
-        self.mesh_switch = None       # Coin nodes of the mesh-based section (see _create_mesh_nodes)
-        self.mesh_nodes = None
-        self.gizmo = None
-        self._gizmo_dragging = False
-        self._gizmo_start_offset = 0.0
-        self._slice_cache = {}
-        self._loop_cache = {}         # mesh section loops per (object, mesh level, plane)
-        self._tri_cache = {}          # OpenCascade triangulation of the section fill (same keys)
-        self._hatch_idx = {}          # object key -> index into HATCH_STYLES
-        self._scene_dirty = False     # a placement / shape changed in the document
-        self._observer = None
-        self.init_done = False
-
-        if not self._collect_targets():
-            self._closed = True
-            return
-
-        # Plane center follows the selected objects; ranges follow the whole scene
-        picked = [t.shape for t in self.targets if t.checked] or [t.shape for t in self.targets]
-        self.bbox = self._union_bbox(picked)
-        scene = self._union_bbox([t.shape for t in self.targets])
-        self.x_len = scene.XMax - scene.XMin
-        self.y_len = scene.YMax - scene.YMin
-        self.z_len = scene.ZMax - scene.ZMin
-
-        self._skipped = 0
-        # Debounce timer: many UI events -> a single update
-        self._timer = QTimer(self)
-        self._timer.setSingleShot(True)
-        self._timer.setInterval(60)
-        self._timer.timeout.connect(self.update_section)
-        # One full (fine) update after parts stop moving
-        self._settle_timer = QTimer(self)
-        self._settle_timer.setSingleShot(True)
-        self._settle_timer.setInterval(SCENE_SETTLE_MS)
-        self._settle_timer.timeout.connect(self.update_section)
-
-        # Features first: init_ui() needs to know whether GPU clipping is available
-        self.create_features()
-        self.init_ui()
-        self.create_gizmo()
-        self.update_style()
-        self.update_section()
-        self.init_done = True
-        self._observer = _SceneObserver(self)
-        App.addDocumentObserver(self._observer)
-        self.show_panel()
+class _SceneMixin:
+    """Finding the objects to section and following them when they move."""
 
     # ------------------------------------------------------------------
     # Setup
@@ -1448,143 +1385,85 @@ class LiveSectionAnalyzer(QDockWidget):
                 return color
         return (0.8, 0.8, 0.8)
 
-    def _create_preview_node(self):
-        """Coin node for the fast drag outline. It sits before the clip plane, so it is
-        never clipped (it lies exactly in the plane)."""
-        if not HAS_NP:
+    # ------------------------------------------------------------------
+    # Following moving parts
+    # ------------------------------------------------------------------
+    def on_scene_changed(self):
+        if self._closed or not FOLLOW_SCENE:
             return
-        try:
-            sw = coin.SoSwitch()
-            sw.whichChild.setValue(coin.SO_SWITCH_NONE)
-            sep = coin.SoSeparator()
-            lm = coin.SoLightModel()
-            lm.model.setValue(coin.SoLightModel.BASE_COLOR)
-            col = coin.SoBaseColor()
-            col.rgb.setValue(0.0, 0.0, 0.0)
-            ds = coin.SoDrawStyle()
-            ds.lineWidth.setValue(2.0)
-            coords = coin.SoCoordinate3()
-            lines = coin.SoLineSet()
-            for node in (lm, col, ds, coords, lines):
-                sep.addChild(node)
-            sw.addChild(sep)
-            self.clip_parent.insertChild(sw, 0)
-            self.preview, self.preview_switch = sep, sw
-            self.preview_coords, self.preview_lines = coords, lines
-        except Exception as e:
-            App.Console.PrintWarning(f"Fast preview unavailable: {e}\n")
-            self.preview = None
+        self._scene_dirty = True
+        self.schedule_update()
 
-    def _create_mesh_nodes(self):
-        """Coin nodes of the mesh-based section: fill (polygons), outline and hatch (lines).
+    def _current_shape(self, t):
+        if t.src is not None:
+            return self._resolve_entry(*t.src)[1]
+        return self._global_shape(t.obj)
 
-        Like the fast preview they sit before the clip plane, so they are never clipped.
-        """
-        if not HAS_NP:
-            return
-        try:
-            sw = coin.SoSwitch()
-            sw.whichChild.setValue(coin.SO_SWITCH_NONE)
-            root = coin.SoSeparator()
-            lm = coin.SoLightModel()
-            lm.model.setValue(coin.SoLightModel.BASE_COLOR)
-            root.addChild(lm)
+    @staticmethod
+    def _rigid_delta(old, new):
+        """4x4 numpy matrix that moves `old` onto `new`, or None if the geometry changed."""
+        if new.isPartner(old):
+            return np.array(new.Matrix.A).reshape(4, 4) @ np.linalg.inv(np.array(old.Matrix.A).reshape(4, 4))
+        a, b = old.Vertexes, new.Vertexes
+        if len(a) != len(b) or len(old.Faces) != len(new.Faces) or not a:
+            return None
+        if abs(old.Volume - new.Volume) > 1e-6 * max(abs(old.Volume), 1.0):
+            return None
+        step = max(1, len(a) // 2000)
+        P = np.array([(v.X, v.Y, v.Z) for v in a[::step]])
+        Q = np.array([(v.X, v.Y, v.Z) for v in b[::step]])
+        # rigid fit (Kabsch); topology order is kept when a shape is only moved
+        pc, qc = P.mean(axis=0), Q.mean(axis=0)
+        U, _, Wt = np.linalg.svd((P - pc).T @ (Q - qc))
+        D = np.diag([1.0, 1.0, np.sign(np.linalg.det(Wt.T @ U.T))])
+        R = Wt.T @ D @ U.T
+        tr = qc - R @ pc
+        diag = max(old.BoundBox.DiagonalLength, 1e-9)
+        if np.abs(P @ R.T + tr - Q).max() > 1e-6 * diag:
+            return None
+        M = np.eye(4)
+        M[:3, :3], M[:3, 3] = R, tr
+        return M
 
-            # fill: concave polygons (holes are bridged in), one color per polygon;
-            # pushed back a little so the lines drawn in the same plane stay on top
-            fsep = coin.SoSeparator()
-            offs = coin.SoPolygonOffset()
-            offs.factor.setValue(1.0)
-            offs.units.setValue(1.0)
-            bind = coin.SoMaterialBinding()
-            bind.value.setValue(coin.SoMaterialBinding.PER_PART)
-            fcol = coin.SoBaseColor()
-            hints = coin.SoShapeHints()
-            hints.vertexOrdering.setValue(coin.SoShapeHints.UNKNOWN_ORDERING)
-            hints.shapeType.setValue(coin.SoShapeHints.UNKNOWN_SHAPE_TYPE)
-            hints.faceType.setValue(coin.SoShapeHints.UNKNOWN_FACE_TYPE)
-            fcoords = coin.SoCoordinate3()
-            fset = coin.SoFaceSet()
-            for node in (offs, bind, fcol, hints, fcoords, fset):
-                fsep.addChild(node)
-            root.addChild(fsep)
+    def _forget(self, t):
+        """Drop every cached section of one target."""
+        for cache in (self._slice_cache, self._loop_cache, self._tri_cache):
+            for k in [k for k in cache if k[0] == t.key]:
+                del cache[k]
 
-            def line_group():
-                sep = coin.SoSeparator()
-                col = coin.SoBaseColor()
-                ds = coin.SoDrawStyle()
-                coords = coin.SoCoordinate3()
-                lines = coin.SoLineSet()
-                for node in (col, ds, coords, lines):
-                    sep.addChild(node)
-                root.addChild(sep)
-                return col, ds, coords, lines
-
-            ecol, eds, ecoords, elines = line_group()
-            hcol, hds, hcoords, hlines = line_group()
-            sw.addChild(root)
-            self.clip_parent.insertChild(sw, 0)
-            self.mesh_switch = sw
-            self.mesh_nodes = {
-                "fill": (fcol, fcoords, fset),
-                "edge": (ecol, eds, ecoords, elines),
-                "hatch": (hcol, hds, hcoords, hlines),
-            }
-        except Exception as e:
-            App.Console.PrintWarning(f"Mesh section unavailable: {e}\n")
-            self.mesh_switch = None
-            self.mesh_nodes = None
-
-    def create_features(self):
-        """Create all features once"""
-        doc = App.ActiveDocument
-        if not doc:
-            return
-
-        # Section fill
-        self.section_feat = doc.addObject("Part::Feature", "Live_Section_Fill")
-        self.section_feat.ViewObject.ShapeColor = (0.75, 0.65, 0.68)
-        self.section_feat.ViewObject.LineColor = (0.0, 0.0, 0.0)
-        self.section_feat.ViewObject.LineWidth = 3.0
-        self.section_feat.ViewObject.DisplayMode = "Shaded"
-        self.section_feat.ViewObject.Transparency = 0
-        self.section_feat.ViewObject.Visibility = False
-
-        # Section edge lines
-        self.edge_feat = doc.addObject("Part::Feature", "Live_Section_Edges")
-        self.edge_feat.ViewObject.LineColor = (0.0, 0.0, 0.0)
-        self.edge_feat.ViewObject.LineWidth = 2.0
-        self.edge_feat.ViewObject.DisplayMode = "Wireframe"
-        self.edge_feat.ViewObject.Visibility = False
-        self.edge_feat.ViewObject.PointSize = 1
-
-        # Hatch lines
-        self.hatch_feat = doc.addObject("Part::Feature", "Live_Hatch_Lines")
-        self.hatch_feat.ViewObject.LineColor = (0.3, 0.3, 0.3)
-        self.hatch_feat.ViewObject.LineWidth = 1.0
-        self.hatch_feat.ViewObject.DisplayMode = "Wireframe"
-        self.hatch_feat.ViewObject.Visibility = False
-        self.hatch_feat.ViewObject.PointSize = 1
-
-        # One GPU clip plane at the root of the 3D view clips EVERYTHING that is shown
-        if HAS_COIN:
+    def _refresh_targets(self):
+        """Re-read the global shapes; moved meshes are transformed, changed ones rebuilt.
+        Returns True if anything moved or changed."""
+        changed = False
+        for t in self.targets:
             try:
-                self.clip = coin.SoClipPlane()
-                self.clip.on.setValue(False)
-                view = Gui.ActiveDocument.ActiveView
-                self.clip_parent = PlaneGizmo._render_group(view.getSceneGraph())
-                self.clip_parent.insertChild(self.clip, 0)
-                self.clip_ok = True
-                self._create_preview_node()
-                self._create_mesh_nodes()
-            except Exception as e:
-                App.Console.PrintWarning(f"Clip plane unavailable, using boolean mode: {e}\n")
-                self.clip = None
-                self.clip_parent = None
-                self.clip_ok = False
+                new = self._current_shape(t)
+            except Exception:
+                continue
+            if new is None or new.isNull() or new.isSame(t.shape):
+                continue
+            M = self._rigid_delta(t.shape, new) if HAS_NP else None
+            if M is not None and np.allclose(M, np.eye(4), atol=1e-12):
+                t.shape = new
+                continue
+            if M is not None:
+                R, tr = M[:3, :3], M[:3, 3]
+                t.meshes = {lvl: (V @ R.T + tr, T, gap) for lvl, (V, T, gap) in t.meshes.items()}
+                if t.mesh is not None:
+                    t.mesh = (t.mesh[0] @ R.T + tr, t.mesh[1])
+            else:
+                t.meshes, t.mesh, t.slice_ms = {}, None, 0.0
+            t.shape = new
+            t.bbox = new.BoundBox
+            t.bg_mode = None                # boolean background: cut again
+            self._forget(t)
+            changed = True
+        return changed
 
-        for feat in (self.section_feat, self.edge_feat, self.hatch_feat):
-            feat.purgeTouched()
+
+
+class _PanelMixin:
+    """Options panel, its event handlers, gizmo callbacks and styles."""
 
     def init_ui(self):
         content = QWidget()
@@ -2173,9 +2052,11 @@ class LiveSectionAnalyzer(QDockWidget):
             elif not t.checked and t.bg_feat is not None:
                 self._release(t)
 
-    # ------------------------------------------------------------------
-    # Geometry helpers
-    # ------------------------------------------------------------------
+
+
+class _GeometryMixin:
+    """Section plane, GPU clip, boolean cut and the exact (OpenCascade) section and hatch."""
+
     def _tilt_text(self):
         ta, tb = self.spin_tilt_a.value(), self.spin_tilt_b.value()
         if abs(ta) < 1e-9 and abs(tb) < 1e-9:
@@ -2257,6 +2138,211 @@ class LiveSectionAnalyzer(QDockWidget):
 
     def _slice_cached(self, t, plane_type, normal, plane_base):
         return (t.key, plane_type, self._nkey(normal), round(normal.dot(plane_base), 4)) in self._slice_cache
+
+    def get_slice(self, t, plane_type, normal, plane_base):
+        """Section wires of one object via Shape.slice (cached)."""
+        d = normal.dot(plane_base)
+        if not self._plane_hits_bbox(t.bbox, normal, d):
+            self._skipped += 1
+            return []
+        key = (t.key, plane_type, self._nkey(normal), round(d, 4))
+        wires = self._slice_cache.get(key)
+        if wires is None:
+            t0 = time.perf_counter()
+            try:
+                wires = t.shape.slice(normal, d)
+            except Exception as e:
+                App.Console.PrintWarning(f"Slice failed: {e}\n")
+                wires = []
+            t.slice_ms = (time.perf_counter() - t0) * 1e3
+            if len(self._slice_cache) >= SLICE_CACHE_SIZE:
+                self._slice_cache.pop(next(iter(self._slice_cache)))
+            self._slice_cache[key] = wires
+        return wires
+
+    @staticmethod
+    def make_faces(wires):
+        """Build faces (with holes) from the slice wires."""
+        if not wires:
+            return []
+        try:
+            f = Part.makeFace(wires, "Part::FaceMakerBullseye")
+            faces = f.Faces
+            if faces:
+                return faces
+        except Exception:
+            pass
+        faces = []
+        for w in wires:
+            try:
+                if w.isClosed():
+                    faces.append(Part.Face(w))
+            except Exception:
+                pass
+        return faces
+
+    @staticmethod
+    def _pt(plane_type, c, u, v):
+        if plane_type == "YZ":
+            return App.Vector(c, u, v)
+        if plane_type == "XZ":
+            return App.Vector(u, c, v)
+        return App.Vector(u, v, c)
+
+    def build_hatch(self, faces, plane_type, center_pos, spacing, angle=45.0):
+        """Hatch of one set of section faces with a SINGLE boolean.
+
+        The lines run at `angle` degrees (in-plane axes as in _pt) and sit at multiples of
+        `spacing` from the origin, exactly like the mesh section draws them.
+        """
+        section = Part.Compound(faces)
+        bb = section.BoundBox
+        U, W, N, d = self._plane_frame
+        corners = [App.Vector(x, y, z) for x in (bb.XMin, bb.XMax)
+                   for y in (bb.YMin, bb.YMax) for z in (bb.ZMin, bb.ZMax)]
+        us = [c.dot(U) for c in corners]
+        vs = [c.dot(W) for c in corners]
+        u_min, u_max, v_min, v_max = min(us) - 2, max(us) + 2, min(vs) - 2, max(vs) + 2
+        origin = N * d
+
+        def pt(u, v):
+            return origin + U * u + W * v
+
+        a = math.radians(angle)
+        nu, nv = math.cos(a), math.sin(a)             # line normal
+        wu, wv = -nv, nu                              # line direction
+        s_vals = [u * nu + v * nv for u in (u_min, u_max) for v in (v_min, v_max)]
+        s_lo, s_hi = min(s_vals), max(s_vals)
+        if (s_hi - s_lo) / spacing > MAX_HATCH_LINES:
+            spacing = (s_hi - s_lo) / MAX_HATCH_LINES
+            App.Console.PrintWarning(
+                "Hatch spacing too small for this section, spacing increased automatically.\n"
+            )
+        half = math.hypot(u_max - u_min, v_max - v_min) / 2 + 1.0
+        t0 = (u_min + u_max) / 2 * wu + (v_min + v_max) / 2 * wv   # centre along the lines
+
+        lines = []
+        j = math.ceil(s_lo / spacing)
+        while j * spacing <= s_hi:
+            s = j * spacing
+            bu, bv = s * nu + t0 * wu, s * nv + t0 * wv
+            lines.append(Part.makeLine(
+                pt(bu - half * wu, bv - half * wv),
+                pt(bu + half * wu, bv + half * wv)))
+            j += 1
+
+        if not lines:
+            return None
+
+        try:
+            result = section.common(Part.Compound(lines))
+            if result.Edges:
+                return result
+        except Exception as e:
+            App.Console.PrintWarning(f"Hatch failed: {e}\n")
+        return None
+
+    def build_hatch_per_object(self, per_obj, plane_type, center_pos, spacing):
+        """Hatch of all sectioned objects, each with its own angle / spacing (HATCH_STYLES)."""
+        parts = []
+        for t, faces in per_obj:
+            angle, scale = self._hatch_style(t)
+            h = self.build_hatch(faces, plane_type, center_pos, spacing * scale, angle)
+            if h is not None:
+                parts.append(h)
+        return Part.Compound(parts) if parts else None
+
+
+
+class _MeshSectionMixin:
+    """Mesh-based section drawn as Coin nodes (uses the numpy core)."""
+
+    def _create_preview_node(self):
+        """Coin node for the fast drag outline. It sits before the clip plane, so it is
+        never clipped (it lies exactly in the plane)."""
+        if not HAS_NP:
+            return
+        try:
+            sw = coin.SoSwitch()
+            sw.whichChild.setValue(coin.SO_SWITCH_NONE)
+            sep = coin.SoSeparator()
+            lm = coin.SoLightModel()
+            lm.model.setValue(coin.SoLightModel.BASE_COLOR)
+            col = coin.SoBaseColor()
+            col.rgb.setValue(0.0, 0.0, 0.0)
+            ds = coin.SoDrawStyle()
+            ds.lineWidth.setValue(2.0)
+            coords = coin.SoCoordinate3()
+            lines = coin.SoLineSet()
+            for node in (lm, col, ds, coords, lines):
+                sep.addChild(node)
+            sw.addChild(sep)
+            self.clip_parent.insertChild(sw, 0)
+            self.preview, self.preview_switch = sep, sw
+            self.preview_coords, self.preview_lines = coords, lines
+        except Exception as e:
+            App.Console.PrintWarning(f"Fast preview unavailable: {e}\n")
+            self.preview = None
+
+    def _create_mesh_nodes(self):
+        """Coin nodes of the mesh-based section: fill (polygons), outline and hatch (lines).
+
+        Like the fast preview they sit before the clip plane, so they are never clipped.
+        """
+        if not HAS_NP:
+            return
+        try:
+            sw = coin.SoSwitch()
+            sw.whichChild.setValue(coin.SO_SWITCH_NONE)
+            root = coin.SoSeparator()
+            lm = coin.SoLightModel()
+            lm.model.setValue(coin.SoLightModel.BASE_COLOR)
+            root.addChild(lm)
+
+            # fill: concave polygons (holes are bridged in), one color per polygon;
+            # pushed back a little so the lines drawn in the same plane stay on top
+            fsep = coin.SoSeparator()
+            offs = coin.SoPolygonOffset()
+            offs.factor.setValue(1.0)
+            offs.units.setValue(1.0)
+            bind = coin.SoMaterialBinding()
+            bind.value.setValue(coin.SoMaterialBinding.PER_PART)
+            fcol = coin.SoBaseColor()
+            hints = coin.SoShapeHints()
+            hints.vertexOrdering.setValue(coin.SoShapeHints.UNKNOWN_ORDERING)
+            hints.shapeType.setValue(coin.SoShapeHints.UNKNOWN_SHAPE_TYPE)
+            hints.faceType.setValue(coin.SoShapeHints.UNKNOWN_FACE_TYPE)
+            fcoords = coin.SoCoordinate3()
+            fset = coin.SoFaceSet()
+            for node in (offs, bind, fcol, hints, fcoords, fset):
+                fsep.addChild(node)
+            root.addChild(fsep)
+
+            def line_group():
+                sep = coin.SoSeparator()
+                col = coin.SoBaseColor()
+                ds = coin.SoDrawStyle()
+                coords = coin.SoCoordinate3()
+                lines = coin.SoLineSet()
+                for node in (col, ds, coords, lines):
+                    sep.addChild(node)
+                root.addChild(sep)
+                return col, ds, coords, lines
+
+            ecol, eds, ecoords, elines = line_group()
+            hcol, hds, hcoords, hlines = line_group()
+            sw.addChild(root)
+            self.clip_parent.insertChild(sw, 0)
+            self.mesh_switch = sw
+            self.mesh_nodes = {
+                "fill": (fcol, fcoords, fset),
+                "edge": (ecol, eds, ecoords, elines),
+                "hatch": (hcol, hds, hcoords, hlines),
+            }
+        except Exception as e:
+            App.Console.PrintWarning(f"Mesh section unavailable: {e}\n")
+            self.mesh_switch = None
+            self.mesh_nodes = None
 
     @staticmethod
     def _tessellation(t):
@@ -2371,81 +2457,6 @@ class LiveSectionAnalyzer(QDockWidget):
                 self._tri_cache.pop(next(iter(self._tri_cache)))
             self._tri_cache[key] = quads
         return quads
-
-    # ------------------------------------------------------------------
-    # Following moving parts
-    # ------------------------------------------------------------------
-    def on_scene_changed(self):
-        if self._closed or not FOLLOW_SCENE:
-            return
-        self._scene_dirty = True
-        self.schedule_update()
-
-    def _current_shape(self, t):
-        if t.src is not None:
-            return self._resolve_entry(*t.src)[1]
-        return self._global_shape(t.obj)
-
-    @staticmethod
-    def _rigid_delta(old, new):
-        """4x4 numpy matrix that moves `old` onto `new`, or None if the geometry changed."""
-        if new.isPartner(old):
-            return np.array(new.Matrix.A).reshape(4, 4) @ np.linalg.inv(np.array(old.Matrix.A).reshape(4, 4))
-        a, b = old.Vertexes, new.Vertexes
-        if len(a) != len(b) or len(old.Faces) != len(new.Faces) or not a:
-            return None
-        if abs(old.Volume - new.Volume) > 1e-6 * max(abs(old.Volume), 1.0):
-            return None
-        step = max(1, len(a) // 2000)
-        P = np.array([(v.X, v.Y, v.Z) for v in a[::step]])
-        Q = np.array([(v.X, v.Y, v.Z) for v in b[::step]])
-        # rigid fit (Kabsch); topology order is kept when a shape is only moved
-        pc, qc = P.mean(axis=0), Q.mean(axis=0)
-        U, _, Wt = np.linalg.svd((P - pc).T @ (Q - qc))
-        D = np.diag([1.0, 1.0, np.sign(np.linalg.det(Wt.T @ U.T))])
-        R = Wt.T @ D @ U.T
-        tr = qc - R @ pc
-        diag = max(old.BoundBox.DiagonalLength, 1e-9)
-        if np.abs(P @ R.T + tr - Q).max() > 1e-6 * diag:
-            return None
-        M = np.eye(4)
-        M[:3, :3], M[:3, 3] = R, tr
-        return M
-
-    def _forget(self, t):
-        """Drop every cached section of one target."""
-        for cache in (self._slice_cache, self._loop_cache, self._tri_cache):
-            for k in [k for k in cache if k[0] == t.key]:
-                del cache[k]
-
-    def _refresh_targets(self):
-        """Re-read the global shapes; moved meshes are transformed, changed ones rebuilt.
-        Returns True if anything moved or changed."""
-        changed = False
-        for t in self.targets:
-            try:
-                new = self._current_shape(t)
-            except Exception:
-                continue
-            if new is None or new.isNull() or new.isSame(t.shape):
-                continue
-            M = self._rigid_delta(t.shape, new) if HAS_NP else None
-            if M is not None and np.allclose(M, np.eye(4), atol=1e-12):
-                t.shape = new
-                continue
-            if M is not None:
-                R, tr = M[:3, :3], M[:3, 3]
-                t.meshes = {lvl: (V @ R.T + tr, T, gap) for lvl, (V, T, gap) in t.meshes.items()}
-                if t.mesh is not None:
-                    t.mesh = (t.mesh[0] @ R.T + tr, t.mesh[1])
-            else:
-                t.meshes, t.mesh, t.slice_ms = {}, None, 0.0
-            t.shape = new
-            t.bbox = new.BoundBox
-            t.bg_mode = None                # boolean background: cut again
-            self._forget(t)
-            changed = True
-        return changed
 
     def _hatch_style(self, t):
         """(angle, spacing factor) of an object; stable for the whole session."""
@@ -2604,118 +2615,278 @@ class LiveSectionAnalyzer(QDockWidget):
         self.preview_lines.numVertices.setNum(k)
         self.preview_switch.whichChild.setValue(coin.SO_SWITCH_ALL)
 
-    def get_slice(self, t, plane_type, normal, plane_base):
-        """Section wires of one object via Shape.slice (cached)."""
-        d = normal.dot(plane_base)
-        if not self._plane_hits_bbox(t.bbox, normal, d):
-            self._skipped += 1
-            return []
-        key = (t.key, plane_type, self._nkey(normal), round(d, 4))
-        wires = self._slice_cache.get(key)
-        if wires is None:
-            t0 = time.perf_counter()
-            try:
-                wires = t.shape.slice(normal, d)
-            except Exception as e:
-                App.Console.PrintWarning(f"Slice failed: {e}\n")
-                wires = []
-            t.slice_ms = (time.perf_counter() - t0) * 1e3
-            if len(self._slice_cache) >= SLICE_CACHE_SIZE:
-                self._slice_cache.pop(next(iter(self._slice_cache)))
-            self._slice_cache[key] = wires
-        return wires
 
+
+class _FreezeMixin:
+    """Freeze Section: copies the current section into static objects."""
+
+    # ------------------------------------------------------------------
+    # Freeze
+    # ------------------------------------------------------------------
     @staticmethod
-    def make_faces(wires):
-        """Build faces (with holes) from the slice wires."""
-        if not wires:
-            return []
+    def _has_shape(feat):
+        return feat is not None and feat.Shape is not None and not feat.Shape.isNull()
+
+    def freeze_section(self):
+        """Freeze current section view using SimpleCopy with folder"""
+        doc = App.ActiveDocument
+        if not doc or not any(t.checked for t in self.targets):
+            return
+
+        progress = None
         try:
-            f = Part.makeFace(wires, "Part::FaceMakerBullseye")
-            faces = f.Faces
-            if faces:
-                return faces
+            progress = QProgressDialog("Freezing section ...", None, 0, 0, Gui.getMainWindow())
+            progress.setWindowTitle("Live Section Analyzer")
+            progress.setWindowModality(Qt.WindowModal)
+            progress.setMinimumDuration(0)
+            progress.setCancelButton(None)
+            progress.show()
+            QApplication.processEvents()
         except Exception:
-            pass
-        faces = []
-        for w in wires:
-            try:
-                if w.isClosed():
-                    faces.append(Part.Face(w))
-            except Exception:
-                pass
-        return faces
-
-    @staticmethod
-    def _pt(plane_type, c, u, v):
-        if plane_type == "YZ":
-            return App.Vector(c, u, v)
-        if plane_type == "XZ":
-            return App.Vector(u, c, v)
-        return App.Vector(u, v, c)
-
-    def build_hatch(self, faces, plane_type, center_pos, spacing, angle=45.0):
-        """Hatch of one set of section faces with a SINGLE boolean.
-
-        The lines run at `angle` degrees (in-plane axes as in _pt) and sit at multiples of
-        `spacing` from the origin, exactly like the mesh section draws them.
-        """
-        section = Part.Compound(faces)
-        bb = section.BoundBox
-        U, W, N, d = self._plane_frame
-        corners = [App.Vector(x, y, z) for x in (bb.XMin, bb.XMax)
-                   for y in (bb.YMin, bb.YMax) for z in (bb.ZMin, bb.ZMax)]
-        us = [c.dot(U) for c in corners]
-        vs = [c.dot(W) for c in corners]
-        u_min, u_max, v_min, v_max = min(us) - 2, max(us) + 2, min(vs) - 2, max(vs) + 2
-        origin = N * d
-
-        def pt(u, v):
-            return origin + U * u + W * v
-
-        a = math.radians(angle)
-        nu, nv = math.cos(a), math.sin(a)             # line normal
-        wu, wv = -nv, nu                              # line direction
-        s_vals = [u * nu + v * nv for u in (u_min, u_max) for v in (v_min, v_max)]
-        s_lo, s_hi = min(s_vals), max(s_vals)
-        if (s_hi - s_lo) / spacing > MAX_HATCH_LINES:
-            spacing = (s_hi - s_lo) / MAX_HATCH_LINES
-            App.Console.PrintWarning(
-                "Hatch spacing too small for this section, spacing increased automatically.\n"
-            )
-        half = math.hypot(u_max - u_min, v_max - v_min) / 2 + 1.0
-        t0 = (u_min + u_max) / 2 * wu + (v_min + v_max) / 2 * wv   # centre along the lines
-
-        lines = []
-        j = math.ceil(s_lo / spacing)
-        while j * spacing <= s_hi:
-            s = j * spacing
-            bu, bv = s * nu + t0 * wu, s * nv + t0 * wv
-            lines.append(Part.makeLine(
-                pt(bu - half * wu, bv - half * wv),
-                pt(bu + half * wu, bv + half * wv)))
-            j += 1
-
-        if not lines:
-            return None
-
+            progress = None
         try:
-            result = section.common(Part.Compound(lines))
-            if result.Edges:
-                return result
-        except Exception as e:
-            App.Console.PrintWarning(f"Hatch failed: {e}\n")
-        return None
+            # Make sure everything is up to date (including hatch)
+            self._timer.stop()
+            self.update_section(force_exact=True)      # real geometry, even in mesh mode
 
-    def build_hatch_per_object(self, per_obj, plane_type, center_pos, spacing):
-        """Hatch of all sectioned objects, each with its own angle / spacing (HATCH_STYLES)."""
-        parts = []
-        for t, faces in per_obj:
-            angle, scale = self._hatch_style(t)
-            h = self.build_hatch(faces, plane_type, center_pos, spacing * scale, angle)
-            if h is not None:
-                parts.append(h)
-        return Part.Compound(parts) if parts else None
+            plane_type, normal, plane_base, center_pos = self.get_plane()
+            offset_val = self.offset_spin.value()
+
+            tilt = self._tilt_text()
+            group_name = f"Frozen_Section_{plane_type}{tilt}_Offset_{offset_val:.1f}"
+
+            # Delete old frozen group
+            if self.frozen_group and doc.getObject(self.frozen_group.Name):
+                for obj in list(self.frozen_group.Group):
+                    try:
+                        doc.removeObject(obj.Name)
+                    except Exception:
+                        pass
+                try:
+                    doc.removeObject(self.frozen_group.Name)
+                except Exception:
+                    pass
+
+            self.frozen_group = doc.addObject("App::DocumentObjectGroup", group_name)
+            self.frozen_group.Label = f"Frozen Section ({plane_type}{tilt.replace('_', ' ')}, Offset: {offset_val:.1f} mm)"
+
+            copied_objects = []
+
+            # 1. Background of every sectioned object: always a real boolean cut
+            #    here, because the live GPU clip does not change the geometry.
+            for t in self.targets:
+                if not t.checked:
+                    continue
+                bg_shape = self.compute_cut_solid(
+                    t.shape, plane_type, normal, plane_base, self.chk_mirror_bg.isChecked()
+                )
+                if bg_shape is not None and not bg_shape.isNull():
+                    bg_copy = doc.addObject("Part::Feature", f"Section_Background_{plane_type}")
+                    bg_copy.Label = f"{t.label} ({plane_type})"
+                    bg_copy.Shape = bg_shape
+                    bg_copy.ViewObject.ShapeColor = t.color
+                    bg_copy.ViewObject.DisplayMode = "Shaded"
+                    bg_copy.ViewObject.Transparency = self.spin_trans.value()
+                    copied_objects.append(bg_copy)
+
+            # 2. Section fill
+            if self.section_feat.ViewObject.Visibility and self._has_shape(self.section_feat):
+                fill_copy = doc.addObject("Part::Feature", f"Section_Fill_{plane_type}")
+                fill_copy.Shape = self.section_feat.Shape
+                fill_copy.Placement = self.section_feat.Placement
+                fill_copy.ViewObject.ShapeColor = self.section_feat.ViewObject.ShapeColor
+                fill_copy.ViewObject.DiffuseColor = self.section_feat.ViewObject.DiffuseColor
+                fill_copy.ViewObject.LineColor = self.section_feat.ViewObject.LineColor
+                fill_copy.ViewObject.LineWidth = self.section_feat.ViewObject.LineWidth
+                fill_copy.ViewObject.DisplayMode = "Shaded"
+                fill_copy.ViewObject.Transparency = 0
+                copied_objects.append(fill_copy)
+
+            # 3. Edge lines
+            if self.edge_feat.ViewObject.Visibility and self._has_shape(self.edge_feat):
+                edge_copy = doc.addObject("Part::Feature", f"Section_Edges_{plane_type}")
+                edge_copy.Shape = self.edge_feat.Shape
+                edge_copy.Placement = self.edge_feat.Placement
+                edge_copy.ViewObject.LineColor = self.edge_feat.ViewObject.LineColor
+                edge_copy.ViewObject.LineWidth = self.edge_feat.ViewObject.LineWidth
+                edge_copy.ViewObject.DisplayMode = "Wireframe"
+                edge_copy.ViewObject.PointSize = 1
+                copied_objects.append(edge_copy)
+
+            # 4. Hatch lines
+            if self.hatch_feat.ViewObject.Visibility and self._has_shape(self.hatch_feat):
+                hatch_copy = doc.addObject("Part::Feature", f"Section_Hatch_{plane_type}")
+                hatch_copy.Shape = self.hatch_feat.Shape
+                hatch_copy.Placement = self.hatch_feat.Placement
+                hatch_copy.ViewObject.LineColor = self.hatch_feat.ViewObject.LineColor
+                hatch_copy.ViewObject.LineWidth = self.hatch_feat.ViewObject.LineWidth
+                hatch_copy.ViewObject.DisplayMode = "Wireframe"
+                hatch_copy.ViewObject.PointSize = self.hatch_point_spin.value()
+                copied_objects.append(hatch_copy)
+
+            if not copied_objects:
+                if progress is not None:
+                    progress.close()
+                QMessageBox.warning(None, "Warning", "No section elements found to copy!")
+                try:
+                    doc.removeObject(self.frozen_group.Name)
+                except Exception:
+                    pass
+                self.frozen_group = None
+                return
+
+            for obj in copied_objects:
+                self.frozen_group.addObject(obj)
+
+            self.frozen_group.ViewObject.Visibility = True
+
+            Gui.Selection.clearSelection()
+            Gui.Selection.addSelection(self.frozen_group)
+
+            for obj in copied_objects:
+                obj.purgeTouched()
+            self.frozen_group.purgeTouched()
+
+            if progress is not None:
+                progress.close()
+            QMessageBox.information(
+                None,
+                "Success",
+                f"Section successfully frozen!\n"
+                f"Group name: {self.frozen_group.Label}\n"
+                f"Element count: {len(copied_objects)}\n"
+                f"Plane: {plane_type}, Offset: {offset_val:.1f} mm\n\n"
+                f"📁 Contents:\n" +
+                "\n".join([f"  • {obj.Label}" for obj in copied_objects])
+            )
+
+        except Exception as e:
+            App.Console.PrintError(f"Freeze Error: {str(e)}\n")
+            QMessageBox.critical(None, "Error", f"Error while freezing section:\n{str(e)}")
+        finally:
+            if progress is not None:
+                progress.close()
+            self.schedule_update()                     # back to the live (mesh or exact) view
+
+
+
+class LiveSectionAnalyzer(_SceneMixin, _PanelMixin, _GeometryMixin, _MeshSectionMixin, _FreezeMixin,
+                          QDockWidget):
+    def __init__(self):
+        super().__init__()
+        self.setWindowTitle("Interactive Section Analysis")
+        self.setAllowedAreas(Qt.LeftDockWidgetArea | Qt.RightDockWidgetArea)
+
+        self._closed = False
+        self._mode = None             # "task" or "dock"
+        self.panel = None
+        self.targets = []             # all listed objects (checked = sectioned)
+        self.section_feat = None
+        self.edge_feat = None
+        self.hatch_feat = None
+        self.frozen_group = None
+        self.clip = None
+        self.clip_parent = None
+        self.clip_ok = False
+        self.preview = None
+        self.mesh_switch = None       # Coin nodes of the mesh-based section (see _create_mesh_nodes)
+        self.mesh_nodes = None
+        self.gizmo = None
+        self._gizmo_dragging = False
+        self._gizmo_start_offset = 0.0
+        self._slice_cache = {}
+        self._loop_cache = {}         # mesh section loops per (object, mesh level, plane)
+        self._tri_cache = {}          # OpenCascade triangulation of the section fill (same keys)
+        self._hatch_idx = {}          # object key -> index into HATCH_STYLES
+        self._scene_dirty = False     # a placement / shape changed in the document
+        self._observer = None
+        self.init_done = False
+
+        if not self._collect_targets():
+            self._closed = True
+            return
+
+        # Plane center follows the selected objects; ranges follow the whole scene
+        picked = [t.shape for t in self.targets if t.checked] or [t.shape for t in self.targets]
+        self.bbox = self._union_bbox(picked)
+        scene = self._union_bbox([t.shape for t in self.targets])
+        self.x_len = scene.XMax - scene.XMin
+        self.y_len = scene.YMax - scene.YMin
+        self.z_len = scene.ZMax - scene.ZMin
+
+        self._skipped = 0
+        # Debounce timer: many UI events -> a single update
+        self._timer = QTimer(self)
+        self._timer.setSingleShot(True)
+        self._timer.setInterval(60)
+        self._timer.timeout.connect(self.update_section)
+        # One full (fine) update after parts stop moving
+        self._settle_timer = QTimer(self)
+        self._settle_timer.setSingleShot(True)
+        self._settle_timer.setInterval(SCENE_SETTLE_MS)
+        self._settle_timer.timeout.connect(self.update_section)
+
+        # Features first: init_ui() needs to know whether GPU clipping is available
+        self.create_features()
+        self.init_ui()
+        self.create_gizmo()
+        self.update_style()
+        self.update_section()
+        self.init_done = True
+        self._observer = _SceneObserver(self)
+        App.addDocumentObserver(self._observer)
+        self.show_panel()
+
+    def create_features(self):
+        """Create all features once"""
+        doc = App.ActiveDocument
+        if not doc:
+            return
+
+        # Section fill
+        self.section_feat = doc.addObject("Part::Feature", "Live_Section_Fill")
+        self.section_feat.ViewObject.ShapeColor = (0.75, 0.65, 0.68)
+        self.section_feat.ViewObject.LineColor = (0.0, 0.0, 0.0)
+        self.section_feat.ViewObject.LineWidth = 3.0
+        self.section_feat.ViewObject.DisplayMode = "Shaded"
+        self.section_feat.ViewObject.Transparency = 0
+        self.section_feat.ViewObject.Visibility = False
+
+        # Section edge lines
+        self.edge_feat = doc.addObject("Part::Feature", "Live_Section_Edges")
+        self.edge_feat.ViewObject.LineColor = (0.0, 0.0, 0.0)
+        self.edge_feat.ViewObject.LineWidth = 2.0
+        self.edge_feat.ViewObject.DisplayMode = "Wireframe"
+        self.edge_feat.ViewObject.Visibility = False
+        self.edge_feat.ViewObject.PointSize = 1
+
+        # Hatch lines
+        self.hatch_feat = doc.addObject("Part::Feature", "Live_Hatch_Lines")
+        self.hatch_feat.ViewObject.LineColor = (0.3, 0.3, 0.3)
+        self.hatch_feat.ViewObject.LineWidth = 1.0
+        self.hatch_feat.ViewObject.DisplayMode = "Wireframe"
+        self.hatch_feat.ViewObject.Visibility = False
+        self.hatch_feat.ViewObject.PointSize = 1
+
+        # One GPU clip plane at the root of the 3D view clips EVERYTHING that is shown
+        if HAS_COIN:
+            try:
+                self.clip = coin.SoClipPlane()
+                self.clip.on.setValue(False)
+                view = Gui.ActiveDocument.ActiveView
+                self.clip_parent = PlaneGizmo._render_group(view.getSceneGraph())
+                self.clip_parent.insertChild(self.clip, 0)
+                self.clip_ok = True
+                self._create_preview_node()
+                self._create_mesh_nodes()
+            except Exception as e:
+                App.Console.PrintWarning(f"Clip plane unavailable, using boolean mode: {e}\n")
+                self.clip = None
+                self.clip_parent = None
+                self.clip_ok = False
+
+        for feat in (self.section_feat, self.edge_feat, self.hatch_feat):
+            feat.purgeTouched()
 
     # ------------------------------------------------------------------
     # Main update
@@ -2903,154 +3074,6 @@ class LiveSectionAnalyzer(QDockWidget):
                     len(active), self._skipped, self._meshed,
                     tm["bg"] * 1e3, tm["slice"] * 1e3, tm["faces"] * 1e3,
                     tm["fill"] * 1e3, tm["edges"] * 1e3, tm["hatch"] * 1e3, total * 1e3))
-
-    # ------------------------------------------------------------------
-    # Freeze
-    # ------------------------------------------------------------------
-    @staticmethod
-    def _has_shape(feat):
-        return feat is not None and feat.Shape is not None and not feat.Shape.isNull()
-
-    def freeze_section(self):
-        """Freeze current section view using SimpleCopy with folder"""
-        doc = App.ActiveDocument
-        if not doc or not any(t.checked for t in self.targets):
-            return
-
-        progress = None
-        try:
-            progress = QProgressDialog("Freezing section ...", None, 0, 0, Gui.getMainWindow())
-            progress.setWindowTitle("Live Section Analyzer")
-            progress.setWindowModality(Qt.WindowModal)
-            progress.setMinimumDuration(0)
-            progress.setCancelButton(None)
-            progress.show()
-            QApplication.processEvents()
-        except Exception:
-            progress = None
-        try:
-            # Make sure everything is up to date (including hatch)
-            self._timer.stop()
-            self.update_section(force_exact=True)      # real geometry, even in mesh mode
-
-            plane_type, normal, plane_base, center_pos = self.get_plane()
-            offset_val = self.offset_spin.value()
-
-            tilt = self._tilt_text()
-            group_name = f"Frozen_Section_{plane_type}{tilt}_Offset_{offset_val:.1f}"
-
-            # Delete old frozen group
-            if self.frozen_group and doc.getObject(self.frozen_group.Name):
-                for obj in list(self.frozen_group.Group):
-                    try:
-                        doc.removeObject(obj.Name)
-                    except Exception:
-                        pass
-                try:
-                    doc.removeObject(self.frozen_group.Name)
-                except Exception:
-                    pass
-
-            self.frozen_group = doc.addObject("App::DocumentObjectGroup", group_name)
-            self.frozen_group.Label = f"Frozen Section ({plane_type}{tilt.replace('_', ' ')}, Offset: {offset_val:.1f} mm)"
-
-            copied_objects = []
-
-            # 1. Background of every sectioned object: always a real boolean cut
-            #    here, because the live GPU clip does not change the geometry.
-            for t in self.targets:
-                if not t.checked:
-                    continue
-                bg_shape = self.compute_cut_solid(
-                    t.shape, plane_type, normal, plane_base, self.chk_mirror_bg.isChecked()
-                )
-                if bg_shape is not None and not bg_shape.isNull():
-                    bg_copy = doc.addObject("Part::Feature", f"Section_Background_{plane_type}")
-                    bg_copy.Label = f"{t.label} ({plane_type})"
-                    bg_copy.Shape = bg_shape
-                    bg_copy.ViewObject.ShapeColor = t.color
-                    bg_copy.ViewObject.DisplayMode = "Shaded"
-                    bg_copy.ViewObject.Transparency = self.spin_trans.value()
-                    copied_objects.append(bg_copy)
-
-            # 2. Section fill
-            if self.section_feat.ViewObject.Visibility and self._has_shape(self.section_feat):
-                fill_copy = doc.addObject("Part::Feature", f"Section_Fill_{plane_type}")
-                fill_copy.Shape = self.section_feat.Shape
-                fill_copy.Placement = self.section_feat.Placement
-                fill_copy.ViewObject.ShapeColor = self.section_feat.ViewObject.ShapeColor
-                fill_copy.ViewObject.DiffuseColor = self.section_feat.ViewObject.DiffuseColor
-                fill_copy.ViewObject.LineColor = self.section_feat.ViewObject.LineColor
-                fill_copy.ViewObject.LineWidth = self.section_feat.ViewObject.LineWidth
-                fill_copy.ViewObject.DisplayMode = "Shaded"
-                fill_copy.ViewObject.Transparency = 0
-                copied_objects.append(fill_copy)
-
-            # 3. Edge lines
-            if self.edge_feat.ViewObject.Visibility and self._has_shape(self.edge_feat):
-                edge_copy = doc.addObject("Part::Feature", f"Section_Edges_{plane_type}")
-                edge_copy.Shape = self.edge_feat.Shape
-                edge_copy.Placement = self.edge_feat.Placement
-                edge_copy.ViewObject.LineColor = self.edge_feat.ViewObject.LineColor
-                edge_copy.ViewObject.LineWidth = self.edge_feat.ViewObject.LineWidth
-                edge_copy.ViewObject.DisplayMode = "Wireframe"
-                edge_copy.ViewObject.PointSize = 1
-                copied_objects.append(edge_copy)
-
-            # 4. Hatch lines
-            if self.hatch_feat.ViewObject.Visibility and self._has_shape(self.hatch_feat):
-                hatch_copy = doc.addObject("Part::Feature", f"Section_Hatch_{plane_type}")
-                hatch_copy.Shape = self.hatch_feat.Shape
-                hatch_copy.Placement = self.hatch_feat.Placement
-                hatch_copy.ViewObject.LineColor = self.hatch_feat.ViewObject.LineColor
-                hatch_copy.ViewObject.LineWidth = self.hatch_feat.ViewObject.LineWidth
-                hatch_copy.ViewObject.DisplayMode = "Wireframe"
-                hatch_copy.ViewObject.PointSize = self.hatch_point_spin.value()
-                copied_objects.append(hatch_copy)
-
-            if not copied_objects:
-                if progress is not None:
-                    progress.close()
-                QMessageBox.warning(None, "Warning", "No section elements found to copy!")
-                try:
-                    doc.removeObject(self.frozen_group.Name)
-                except Exception:
-                    pass
-                self.frozen_group = None
-                return
-
-            for obj in copied_objects:
-                self.frozen_group.addObject(obj)
-
-            self.frozen_group.ViewObject.Visibility = True
-
-            Gui.Selection.clearSelection()
-            Gui.Selection.addSelection(self.frozen_group)
-
-            for obj in copied_objects:
-                obj.purgeTouched()
-            self.frozen_group.purgeTouched()
-
-            if progress is not None:
-                progress.close()
-            QMessageBox.information(
-                None,
-                "Success",
-                f"Section successfully frozen!\n"
-                f"Group name: {self.frozen_group.Label}\n"
-                f"Element count: {len(copied_objects)}\n"
-                f"Plane: {plane_type}, Offset: {offset_val:.1f} mm\n\n"
-                f"📁 Contents:\n" +
-                "\n".join([f"  • {obj.Label}" for obj in copied_objects])
-            )
-
-        except Exception as e:
-            App.Console.PrintError(f"Freeze Error: {str(e)}\n")
-            QMessageBox.critical(None, "Error", f"Error while freezing section:\n{str(e)}")
-        finally:
-            if progress is not None:
-                progress.close()
-            self.schedule_update()                     # back to the live (mesh or exact) view
 
     # ------------------------------------------------------------------
     # Cleanup

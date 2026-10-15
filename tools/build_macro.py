@@ -22,7 +22,12 @@ PARTS = [
     "gizmo.py",       # 3D plane gizmo and its event filter
     "widgets.py",     # collapsible section, task panel adapter
     "targets.py",     # scene observer, listed objects
-    "analyzer.py",    # LiveSectionAnalyzer: panel and update pipeline
+    "scene.py",       # mixin: collecting the objects, following moved parts
+    "panel.py",       # mixin: options panel, handlers, styles
+    "geometry.py",    # mixin: plane, clip, exact section and hatch
+    "mesh_section.py",# mixin: mesh-based section (Coin nodes)
+    "freeze.py",      # mixin: Freeze Section
+    "analyzer.py",    # LiveSectionAnalyzer: setup, update pipeline, cleanup
     "run.py",         # starts the macro
 ]
 
