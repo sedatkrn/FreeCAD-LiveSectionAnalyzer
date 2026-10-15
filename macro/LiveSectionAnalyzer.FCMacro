@@ -4,7 +4,7 @@ Interactive, real-time section analysis for FreeCAD.
 Select a solid, run the macro, and move the section plane with a slider,
 a spin box or by dragging a gizmo directly in the 3D view.
 
-Version: 0.6.0   (keep in sync with VERSION below)
+Version: 0.7.0   (keep in sync with VERSION below)
 Author: Sedat Kuran
 License: MIT (see LICENSE)
 Repository: https://github.com/sedatkrn/FreeCAD-LiveSectionAnalyzer
@@ -485,7 +485,7 @@ def hatch_segments(loops, angle_deg, spacing, max_lines=1500):
     return np.stack((A, B), axis=1)
 # END MESH CORE
 
-VERSION = "0.6.0"
+VERSION = "0.7.0"
 
 # Project icon (96 px PNG), shown in the panel header and as the dock icon. docs/icon.png is
 # the 256 px source, docs/logo.png the full logo with the title.
