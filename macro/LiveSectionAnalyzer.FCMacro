@@ -60,8 +60,14 @@ CLIP_KEEP_NEGATIVE = True
 MAX_HATCH_LINES = 1500
 
 # Let the gizmo be grabbed on the plane itself (surface and outline), not only
-# on the arrow. Set to False if you need to click objects behind the plane.
-GIZMO_PICK_PLANE = True
+# on the arrow. Off by default: the plane covers the model on screen, and while
+# it grabs clicks you cannot select faces under it (e.g. for Assembly joints).
+GIZMO_PICK_PLANE = False
+
+# Follow parts that move (Assembly solver, dragging, placement edits). After the
+# last change the fine section is rebuilt once the scene has been still this long.
+FOLLOW_SCENE = True
+SCENE_SETTLE_MS = 300
 
 # v0.5 (experimental): print per-update timings (slice / faces / fill / edges /
 # hatch / total, objects skipped by the bounding-box test) to the Report view.
@@ -1167,6 +1173,23 @@ class SectionTaskPanel:
         return True
 
 
+class _SceneObserver:
+    """Document observer: flags placement / shape changes of scene objects."""
+
+    PROPS = ("Placement", "Shape", "LinkPlacement", "LinkedObject", "Group")
+
+    def __init__(self, owner):
+        self.owner = owner
+
+    def slotChangedObject(self, obj, prop):
+        try:
+            if prop not in self.PROPS or obj.Name.startswith(("Live_", "Section_")):
+                return
+            self.owner.on_scene_changed()
+        except Exception:
+            pass
+
+
 class _Target:
     """One object of the scene: its global shape and (when sectioned) its copy."""
 
@@ -1184,6 +1207,7 @@ class _Target:
         self.bg_feat = None
         self.bg_mode = None
         self.was_visible = True
+        self.src = None             # (top object, subname) when picked from the selection
 
 
 class LiveSectionAnalyzer(QDockWidget):
@@ -1213,6 +1237,8 @@ class LiveSectionAnalyzer(QDockWidget):
         self._loop_cache = {}         # mesh section loops per (object, mesh level, plane)
         self._tri_cache = {}          # OpenCascade triangulation of the section fill (same keys)
         self._hatch_idx = {}          # object key -> index into HATCH_STYLES
+        self._scene_dirty = False     # a placement / shape changed in the document
+        self._observer = None
         self.init_done = False
 
         if not self._collect_targets():
@@ -1233,6 +1259,11 @@ class LiveSectionAnalyzer(QDockWidget):
         self._timer.setSingleShot(True)
         self._timer.setInterval(60)
         self._timer.timeout.connect(self.update_section)
+        # One full (fine) update after parts stop moving
+        self._settle_timer = QTimer(self)
+        self._settle_timer.setSingleShot(True)
+        self._settle_timer.setInterval(SCENE_SETTLE_MS)
+        self._settle_timer.timeout.connect(self.update_section)
 
         # Features first: init_ui() needs to know whether GPU clipping is available
         self.create_features()
@@ -1241,6 +1272,8 @@ class LiveSectionAnalyzer(QDockWidget):
         self.update_style()
         self.update_section()
         self.init_done = True
+        self._observer = _SceneObserver(self)
+        App.addDocumentObserver(self._observer)
         self.show_panel()
 
     # ------------------------------------------------------------------
@@ -1248,8 +1281,8 @@ class LiveSectionAnalyzer(QDockWidget):
     # ------------------------------------------------------------------
     # Selected objects that only hold other objects: the part to section is the
     # first child in the selection path.
-    _CONTAINERS = ("App::Part", "Assembly::AssemblyObject", "App::LinkGroup",
-                   "App::DocumentObjectGroup")
+    _CONTAINERS = ("App::Part", "Assembly::AssemblyObject", "Assembly::AssemblyLink",
+                   "App::LinkGroup", "App::DocumentObjectGroup")
 
     @staticmethod
     def _union_bbox(shapes):
@@ -1291,11 +1324,24 @@ class LiveSectionAnalyzer(QDockWidget):
                     target = first
             except Exception:
                 pass
+        if target is not top or top.getParentGeoFeatureGroup() is not None:
+            try:
+                return target, self._global_shape(target)
+            except Exception:
+                pass
         return target, self._solid_or_compound(shape)
 
     def _global_shape(self, obj):
-        """Shape of a scene object with the placements of all its parents."""
-        chain, cur = [], obj
+        """Shape of a scene object with the placements of all its parents.
+
+        The parent placements are multiplied here instead of resolving a subname
+        path with Part.getShape(): for parts inside an Assembly::AssemblyLink that
+        path ignores the link's own placement (moved sub-assemblies left their
+        section behind). Only the Location changes, so the TShape is shared and a
+        pure move is cheap to detect (see _rigid_delta).
+        """
+        shape = Part.getShape(obj, needSubElement=False, refine=False)
+        cur = obj
         while True:
             try:
                 parent = cur.getParentGeoFeatureGroup()
@@ -1303,10 +1349,10 @@ class LiveSectionAnalyzer(QDockWidget):
                 parent = None
             if parent is None:
                 break
-            chain.insert(0, cur.Name)
+            pl = getattr(parent, "Placement", None)
+            if pl is not None:
+                shape.Placement = pl.multiply(shape.Placement)
             cur = parent
-        sub = ".".join(chain) + "." if chain else ""
-        shape = Part.getShape(cur, sub, needSubElement=False, refine=False)
         return self._solid_or_compound(shape)
 
     def _scene_targets(self, skip_keys=()):
@@ -1356,7 +1402,9 @@ class LiveSectionAnalyzer(QDockWidget):
                 if key in seen:
                     continue
                 seen.add(key)
-                picked.append(_Target(obj, shape, checked=True))
+                t = _Target(obj, shape, checked=True)
+                t.src = (sel.Object, sub)
+                picked.append(t)
         scene = self._scene_targets(skip_keys=seen)
         if not picked:
             # Nothing selected: clip everything that is visible. A small scene is
@@ -2101,14 +2149,17 @@ class LiveSectionAnalyzer(QDockWidget):
             except Exception:
                 pass
 
-    def _sync_targets(self):
-        """Create / remove the background copies so they match the checked list."""
+    def _sync_targets(self, use_clip=False):
+        """Create / remove the background copies so they match the checked list.
+        Copies are only needed for the boolean cut; GPU clipping cuts the originals."""
         doc = App.ActiveDocument
         if not doc:
             return
         trans = self.spin_trans.value() if hasattr(self, "spin_trans") else 70
         for t in self.targets:
-            if t.checked and t.bg_feat is None:
+            if use_clip:
+                self._release(t)
+            elif t.checked and t.bg_feat is None:
                 t.was_visible = bool(t.obj.ViewObject.Visibility)
                 feat = doc.addObject("Part::Feature", "Live_Section_Background")
                 feat.ViewObject.ShapeColor = t.color
@@ -2318,6 +2369,81 @@ class LiveSectionAnalyzer(QDockWidget):
                 self._tri_cache.pop(next(iter(self._tri_cache)))
             self._tri_cache[key] = quads
         return quads
+
+    # ------------------------------------------------------------------
+    # Following moving parts
+    # ------------------------------------------------------------------
+    def on_scene_changed(self):
+        if self._closed or not FOLLOW_SCENE:
+            return
+        self._scene_dirty = True
+        self.schedule_update()
+
+    def _current_shape(self, t):
+        if t.src is not None:
+            return self._resolve_entry(*t.src)[1]
+        return self._global_shape(t.obj)
+
+    @staticmethod
+    def _rigid_delta(old, new):
+        """4x4 numpy matrix that moves `old` onto `new`, or None if the geometry changed."""
+        if new.isPartner(old):
+            return np.array(new.Matrix.A).reshape(4, 4) @ np.linalg.inv(np.array(old.Matrix.A).reshape(4, 4))
+        a, b = old.Vertexes, new.Vertexes
+        if len(a) != len(b) or len(old.Faces) != len(new.Faces) or not a:
+            return None
+        if abs(old.Volume - new.Volume) > 1e-6 * max(abs(old.Volume), 1.0):
+            return None
+        step = max(1, len(a) // 2000)
+        P = np.array([(v.X, v.Y, v.Z) for v in a[::step]])
+        Q = np.array([(v.X, v.Y, v.Z) for v in b[::step]])
+        # rigid fit (Kabsch); topology order is kept when a shape is only moved
+        pc, qc = P.mean(axis=0), Q.mean(axis=0)
+        U, _, Wt = np.linalg.svd((P - pc).T @ (Q - qc))
+        D = np.diag([1.0, 1.0, np.sign(np.linalg.det(Wt.T @ U.T))])
+        R = Wt.T @ D @ U.T
+        tr = qc - R @ pc
+        diag = max(old.BoundBox.DiagonalLength, 1e-9)
+        if np.abs(P @ R.T + tr - Q).max() > 1e-6 * diag:
+            return None
+        M = np.eye(4)
+        M[:3, :3], M[:3, 3] = R, tr
+        return M
+
+    def _forget(self, t):
+        """Drop every cached section of one target."""
+        for cache in (self._slice_cache, self._loop_cache, self._tri_cache):
+            for k in [k for k in cache if k[0] == t.key]:
+                del cache[k]
+
+    def _refresh_targets(self):
+        """Re-read the global shapes; moved meshes are transformed, changed ones rebuilt.
+        Returns True if anything moved or changed."""
+        changed = False
+        for t in self.targets:
+            try:
+                new = self._current_shape(t)
+            except Exception:
+                continue
+            if new is None or new.isNull() or new.isSame(t.shape):
+                continue
+            M = self._rigid_delta(t.shape, new) if HAS_NP else None
+            if M is not None and np.allclose(M, np.eye(4), atol=1e-12):
+                t.shape = new
+                continue
+            if M is not None:
+                R, tr = M[:3, :3], M[:3, 3]
+                t.meshes = {lvl: (V @ R.T + tr, T, gap) for lvl, (V, T, gap) in t.meshes.items()}
+                if t.mesh is not None:
+                    t.mesh = (t.mesh[0] @ R.T + tr, t.mesh[1])
+            else:
+                t.meshes, t.mesh, t.slice_ms = {}, None, 0.0
+            t.shape = new
+            t.bbox = new.BoundBox
+            t.bg_mode = None                # boolean background: cut again
+            self._forget(t)
+            changed = True
+        return changed
 
     def _hatch_style(self, t):
         """(angle, spacing factor) of an object; stable for the whole session."""
@@ -2618,7 +2744,14 @@ class LiveSectionAnalyzer(QDockWidget):
         # While dragging the slider we only do the cheap parts
         quick = self.slider.isSliderDown() or self._gizmo_dragging
 
-        self._sync_targets()
+        if self._scene_dirty:
+            self._scene_dirty = False
+            if self._refresh_targets():
+                quick = True                    # parts are moving: coarse now, fine when they stop
+                self._settle_timer.start()
+
+        use_clip = self.clip_ok and self.chk_gpu_clip.isChecked()
+        self._sync_targets(use_clip)
         active = [t for t in self.targets if t.checked]
         busy = not quick                                   # wait cursor for the full (slow) update
         if busy:
@@ -2626,7 +2759,6 @@ class LiveSectionAnalyzer(QDockWidget):
 
         plane_type, normal, plane_base, center_pos = self.get_plane()
         flip = self.chk_mirror_bg.isChecked()
-        use_clip = self.clip_ok and self.chk_gpu_clip.isChecked()
         pose = self._overlay_pose(normal, flip, use_clip)
         # force_exact: Freeze needs the real OpenCascade geometry
         mesh_mode = self._mesh_active() and not force_exact
@@ -2643,16 +2775,11 @@ class LiveSectionAnalyzer(QDockWidget):
 
             # --- BACKGROUND copies of the sectioned objects ---
             t0 = time.perf_counter()
-            for t in active:
+            # GPU mode needs no copies: the clip plane cuts the original objects,
+            # which stay selectable (Assembly joints, measuring, ...).
+            for t in (() if use_clip else active):
                 self._vis(t.obj, False)
-                if use_clip:
-                    if t.bg_mode != "clip":
-                        t.bg_feat.Shape = t.shape            # tessellated once
-                        # The clipped solid is open, so back faces become visible;
-                        # one-sided lighting avoids their yellowish tint.
-                        self._set(t.bg_feat.ViewObject, "Lighting", "One side")
-                        t.bg_mode = "clip"
-                elif not quick:
+                if t.bg_mode is None or not quick:
                     # (while dragging in boolean mode the previous solid is kept)
                     t.bg_feat.Shape = self.compute_cut_solid(t.shape, plane_type, normal, plane_base, flip)
                     self._set(t.bg_feat.ViewObject, "Lighting", "Two side")
@@ -2940,8 +3067,15 @@ class LiveSectionAnalyzer(QDockWidget):
 
         try:
             self._timer.stop()
+            self._settle_timer.stop()
         except Exception:
             pass
+        if self._observer is not None:
+            try:
+                App.removeDocumentObserver(self._observer)
+            except Exception:
+                pass
+            self._observer = None
 
         if self.gizmo is not None:
             self.gizmo.remove()
