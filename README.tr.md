@@ -6,6 +6,8 @@
 
 [English](README.md)
 
+![Dişli pompa montajında canlı kesit (v0.7)](screenshots/oil-pump-v0.7.webp)
+
 ![Gizmo ile kesit düzlemi](screenshots/section-yz-isometric.png)
 
 ## Özellikler

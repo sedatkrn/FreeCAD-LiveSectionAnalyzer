@@ -21,6 +21,8 @@ I will maintain the addon.
 
 [Türkçe](README.tr.md)
 
+![Live section of a gear pump assembly (v0.7)](screenshots/oil-pump-v0.7.webp)
+
 ![Section plane with gizmo](screenshots/section-yz-isometric.png)
 
 ## Features
