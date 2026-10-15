@@ -23,6 +23,8 @@ I will maintain the addon.
 
 ![Live section of a gear pump assembly (v0.7)](screenshots/oil-pump-v0.7.webp)
 
+![Tilted section plane (37.6° about X) through the same pump](screenshots/oil-pump-tilted-v0.7.webp)
+
 ![Section plane with gizmo](screenshots/section-yz-isometric.png)
 
 ## Features

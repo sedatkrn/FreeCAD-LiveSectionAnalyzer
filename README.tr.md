@@ -8,6 +8,8 @@
 
 ![Dişli pompa montajında canlı kesit (v0.7)](screenshots/oil-pump-v0.7.webp)
 
+![Aynı pompada eğik kesit düzlemi (X ekseninde 37,6°)](screenshots/oil-pump-tilted-v0.7.webp)
+
 ![Gizmo ile kesit düzlemi](screenshots/section-yz-isometric.png)
 
 ## Özellikler
