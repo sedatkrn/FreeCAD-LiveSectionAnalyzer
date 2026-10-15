@@ -85,6 +85,8 @@ class PlaneGizmo:
         head_r = L * 0.11
         head_h = L * 0.26
         self.reach = L + head_h
+        self._head_h = head_h
+        self.k = 1.0                          # handle scale, set while rendering (_on_render)
 
         # SoAnnotation renders after the scene with depth test off, so the gizmo
         # stays visible even behind semi-transparent geometry
@@ -92,6 +94,12 @@ class PlaneGizmo:
         self.switch = coin.SoSwitch()
         self.switch.whichChild.setValue(coin.SO_SWITCH_ALL)
         self.root.addChild(self.switch)
+
+        # Computes the handle scale from the camera of the frame being drawn, so
+        # zooming never shows a frame with the old size (no popping).
+        self._render_cb = coin.SoCallback()
+        self._render_cb.setCallback(self._on_render)
+        self.switch.addChild(self._render_cb)
 
         grp = coin.SoSeparator()
         self.switch.addChild(grp)
@@ -137,6 +145,8 @@ class PlaneGizmo:
         rings.addChild(rlm)
         self.rtf = coin.SoTransform()
         rings.addChild(self.rtf)
+        self.ring_scale = coin.SoScale()          # rings are built at k = 1 and scaled here
+        rings.addChild(self.ring_scale)
         self.ring_col, self.ring_coords, self.ring_handle = [], [], []
         for k in range(2):
             sep = coin.SoSeparator()
@@ -167,6 +177,8 @@ class PlaneGizmo:
         depth = coin.SoDepthBuffer()
         depth.test.setValue(False)
         arrow.addChild(depth)
+        self.arrow_scale = coin.SoScale()
+        arrow.addChild(self.arrow_scale)
         arrow.addChild(self.color)
 
         shaft = coin.SoCylinder()
@@ -187,6 +199,31 @@ class PlaneGizmo:
             sep.addChild(cone)
             arrow.addChild(sep)
 
+    def _apply_scale(self, k):
+        """Scale arrow and rotation handles by k (the plane outline is not scaled)."""
+        L = self.size
+        self.k = k
+        self.arrow_scale.scaleFactor.setValue(k, k, k)
+        self.ring_scale.scaleFactor.setValue(k, k, k)
+        self.reach = (L + self._head_h) * k
+        self.ring_rs = (L * k, L * k)
+
+    def _on_render(self, _data, action):
+        """SoCallback: keep the arrow GIZMO_SCREEN_PX pixels long (half length)."""
+        if GIZMO_SCREEN_PX <= 0 or not action.isOfType(coin.SoGLRenderAction.getClassTypeId()):
+            return
+        try:
+            state = action.getState()
+            h = max(coin.SoViewportRegionElement.get(state).getViewportSizePixels()[1], 1)
+            o = self.origin
+            world = coin.SoViewVolumeElement.get(state).getWorldToScreenScale(
+                coin.SbVec3f(o.x, o.y, o.z), GIZMO_SCREEN_PX / h)
+            k = world / max(self.size, 1e-9)
+        except Exception:
+            return
+        if k > 0 and abs(k - self.k) > 1e-4 * self.k:
+            self._apply_scale(k)
+
     def set_extents(self, half_u, half_w):
         self.half_u, self.half_w = half_u, half_w
         pts = [(-half_u, 0, -half_w), (half_u, 0, -half_w),
@@ -197,11 +234,11 @@ class PlaneGizmo:
         """(axis, first basis direction) of the two rotation rings."""
         return ((self.u_axis, self.normal), (self.fixed_axis, self.u_axis))
 
-    def _ring_point(self, k, deg):
+    def _ring_point(self, k, deg, R=None):
         a, e1 = self._ring_defs()[k]
         e2 = a.cross(e1)
         t = math.radians(deg)
-        R = self.ring_rs[k]
+        R = self.ring_rs[k] if R is None else R
         return e1 * (math.cos(t) * R) + e2 * (math.sin(t) * R)
 
     def _update_rings(self):
@@ -210,10 +247,11 @@ class PlaneGizmo:
             hd = self.HANDLE_DEG[k]
             pts = []
             for i in range(self.RING_RES + 1):
-                v = self._ring_point(k, hd - self.ARC_HALF_DEG + 2 * self.ARC_HALF_DEG * i / self.RING_RES)
+                v = self._ring_point(k, hd - self.ARC_HALF_DEG + 2 * self.ARC_HALF_DEG * i / self.RING_RES,
+                                     self.size)
                 pts.append((v.x, v.y, v.z))
             self.ring_coords[k].point.setValues(0, len(pts), pts)
-            h = self._ring_point(k, hd)
+            h = self._ring_point(k, hd, self.size)
             self.ring_handle[k].translation.setValue(h.x, h.y, h.z)
 
     def set_pose(self, origin, normal, u_axis, fixed_axis=None):

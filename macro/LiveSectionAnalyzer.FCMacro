@@ -66,6 +66,11 @@ MAX_HATCH_LINES = 1500
 # it grabs clicks you cannot select faces under it (e.g. for Assembly joints).
 GIZMO_PICK_PLANE = False
 
+# The gizmo arrow and rotation handles keep this size on screen (half the arrow
+# length, in pixels) while you zoom; the plane outline still follows the model.
+# 0 = everything scales with the model, as before 0.7.
+GIZMO_SCREEN_PX = 110
+
 # Follow parts that move (Assembly solver, dragging, placement edits). After the
 # last change the fine section is rebuilt once the scene has been still this long.
 FOLLOW_SCENE = True
@@ -610,6 +615,100 @@ def _logo_pixmap(size=None):
 
 
 
+# ----------------------------------------------------------------------
+# Toolbar button: registers the macro as a command on a global toolbar
+# (shown in every workbench), the same as Tools -> Customize -> Macros.
+# ----------------------------------------------------------------------
+TOOLBAR_NAME = "Live Section"
+TOOLBAR_SHORTCUT = "Shift+S"      # only assigned when no other command uses it
+_TOOLBAR_PARAM = "User parameter:BaseApp/Workbench/Global/Toolbar"
+_MACRO_FILE = globals().get("__file__")
+
+
+def _macro_path():
+    """Absolute path of this macro file, or None if it cannot be found."""
+    import os
+    if _MACRO_FILE and os.path.isfile(_MACRO_FILE):
+        return os.path.abspath(_MACRO_FILE)
+    guess = os.path.join(App.getUserMacroDir(True), "LiveSectionAnalyzer.FCMacro")
+    return guess if os.path.isfile(guess) else None
+
+
+def _macro_script_name(path):
+    """Commands refer to macros in the user macro folder by file name only."""
+    import os
+    if os.path.normpath(os.path.dirname(path)) == os.path.normpath(App.getUserMacroDir(True)):
+        return os.path.basename(path)
+    return path
+
+
+def _toolbar_group():
+    root = App.ParamGet(_TOOLBAR_PARAM)
+    for g in root.GetGroups():
+        if App.ParamGet(f"{_TOOLBAR_PARAM}/{g}").GetString("Name") == TOOLBAR_NAME:
+            return g
+    return None
+
+
+def toolbar_installed():
+    return _toolbar_group() is not None
+
+
+def _reload_toolbars():
+    try:
+        Gui.activeWorkbench().reloadActive()
+    except Exception:
+        pass
+
+
+def install_toolbar():
+    """Create the command and the toolbar. Returns (command name, shortcut or "")."""
+    import base64
+    import os
+    path = _macro_path()
+    if path is None:
+        raise RuntimeError("the macro file was not found; run it from Macro -> Macros...")
+    script = _macro_script_name(path)
+    icon = os.path.join(os.path.dirname(path), "LiveSectionAnalyzer.png")
+    if not os.path.isfile(icon):
+        with open(icon, "wb") as fh:
+            fh.write(base64.b64decode(_LOGO_PNG_B64))
+    shortcut = "" if Gui.Command.listByShortcut(TOOLBAR_SHORTCUT) else TOOLBAR_SHORTCUT
+    cmd = Gui.Command.findCustomCommand(script)
+    if cmd is None:
+        cmd = Gui.Command.createCustomCommand(
+            script, "Live Section Analyzer",
+            "Interactive section view (Live Section Analyzer)",
+            "Opens the Live Section Analyzer panel",
+            "Interactive section view", icon, shortcut)
+    else:
+        shortcut = Gui.Command.get(cmd).getShortcut()
+    if _toolbar_group() is None:
+        root = App.ParamGet(_TOOLBAR_PARAM)
+        n = 1
+        while f"Custom_{n}" in root.GetGroups():
+            n += 1
+        grp = App.ParamGet(f"{_TOOLBAR_PARAM}/Custom_{n}")
+        grp.SetString("Name", TOOLBAR_NAME)
+        grp.SetBool("Active", True)
+        grp.SetString(cmd, "FreeCAD")
+    _reload_toolbars()
+    return cmd, shortcut
+
+
+def uninstall_toolbar():
+    """Remove the toolbar and the command created by install_toolbar()."""
+    g = _toolbar_group()
+    if g is not None:
+        App.ParamGet(_TOOLBAR_PARAM).RemGroup(g)
+    path = _macro_path()
+    if path is not None:
+        cmd = Gui.Command.findCustomCommand(_macro_script_name(path))
+        if cmd is not None:
+            Gui.Command.removeCustomCommand(cmd)
+    _reload_toolbars()
+
+
 class _GizmoEventFilter(QObject):
     """Qt event filter: forwards mouse events of the 3D view to the gizmo."""
 
@@ -697,6 +796,8 @@ class PlaneGizmo:
         head_r = L * 0.11
         head_h = L * 0.26
         self.reach = L + head_h
+        self._head_h = head_h
+        self.k = 1.0                          # handle scale, set while rendering (_on_render)
 
         # SoAnnotation renders after the scene with depth test off, so the gizmo
         # stays visible even behind semi-transparent geometry
@@ -704,6 +805,12 @@ class PlaneGizmo:
         self.switch = coin.SoSwitch()
         self.switch.whichChild.setValue(coin.SO_SWITCH_ALL)
         self.root.addChild(self.switch)
+
+        # Computes the handle scale from the camera of the frame being drawn, so
+        # zooming never shows a frame with the old size (no popping).
+        self._render_cb = coin.SoCallback()
+        self._render_cb.setCallback(self._on_render)
+        self.switch.addChild(self._render_cb)
 
         grp = coin.SoSeparator()
         self.switch.addChild(grp)
@@ -749,6 +856,8 @@ class PlaneGizmo:
         rings.addChild(rlm)
         self.rtf = coin.SoTransform()
         rings.addChild(self.rtf)
+        self.ring_scale = coin.SoScale()          # rings are built at k = 1 and scaled here
+        rings.addChild(self.ring_scale)
         self.ring_col, self.ring_coords, self.ring_handle = [], [], []
         for k in range(2):
             sep = coin.SoSeparator()
@@ -779,6 +888,8 @@ class PlaneGizmo:
         depth = coin.SoDepthBuffer()
         depth.test.setValue(False)
         arrow.addChild(depth)
+        self.arrow_scale = coin.SoScale()
+        arrow.addChild(self.arrow_scale)
         arrow.addChild(self.color)
 
         shaft = coin.SoCylinder()
@@ -799,6 +910,31 @@ class PlaneGizmo:
             sep.addChild(cone)
             arrow.addChild(sep)
 
+    def _apply_scale(self, k):
+        """Scale arrow and rotation handles by k (the plane outline is not scaled)."""
+        L = self.size
+        self.k = k
+        self.arrow_scale.scaleFactor.setValue(k, k, k)
+        self.ring_scale.scaleFactor.setValue(k, k, k)
+        self.reach = (L + self._head_h) * k
+        self.ring_rs = (L * k, L * k)
+
+    def _on_render(self, _data, action):
+        """SoCallback: keep the arrow GIZMO_SCREEN_PX pixels long (half length)."""
+        if GIZMO_SCREEN_PX <= 0 or not action.isOfType(coin.SoGLRenderAction.getClassTypeId()):
+            return
+        try:
+            state = action.getState()
+            h = max(coin.SoViewportRegionElement.get(state).getViewportSizePixels()[1], 1)
+            o = self.origin
+            world = coin.SoViewVolumeElement.get(state).getWorldToScreenScale(
+                coin.SbVec3f(o.x, o.y, o.z), GIZMO_SCREEN_PX / h)
+            k = world / max(self.size, 1e-9)
+        except Exception:
+            return
+        if k > 0 and abs(k - self.k) > 1e-4 * self.k:
+            self._apply_scale(k)
+
     def set_extents(self, half_u, half_w):
         self.half_u, self.half_w = half_u, half_w
         pts = [(-half_u, 0, -half_w), (half_u, 0, -half_w),
@@ -809,11 +945,11 @@ class PlaneGizmo:
         """(axis, first basis direction) of the two rotation rings."""
         return ((self.u_axis, self.normal), (self.fixed_axis, self.u_axis))
 
-    def _ring_point(self, k, deg):
+    def _ring_point(self, k, deg, R=None):
         a, e1 = self._ring_defs()[k]
         e2 = a.cross(e1)
         t = math.radians(deg)
-        R = self.ring_rs[k]
+        R = self.ring_rs[k] if R is None else R
         return e1 * (math.cos(t) * R) + e2 * (math.sin(t) * R)
 
     def _update_rings(self):
@@ -822,10 +958,11 @@ class PlaneGizmo:
             hd = self.HANDLE_DEG[k]
             pts = []
             for i in range(self.RING_RES + 1):
-                v = self._ring_point(k, hd - self.ARC_HALF_DEG + 2 * self.ARC_HALF_DEG * i / self.RING_RES)
+                v = self._ring_point(k, hd - self.ARC_HALF_DEG + 2 * self.ARC_HALF_DEG * i / self.RING_RES,
+                                     self.size)
                 pts.append((v.x, v.y, v.z))
             self.ring_coords[k].point.setValues(0, len(pts), pts)
-            h = self._ring_point(k, hd)
+            h = self._ring_point(k, hd, self.size)
             self.ring_handle[k].translation.setValue(h.x, h.y, h.z)
 
     def set_pose(self, origin, normal, u_axis, fixed_axis=None):
@@ -1483,6 +1620,11 @@ class _PanelMixin:
             "<span style='color: #777; font-size: 10px;'>FreeCAD clipping macro  v%s</span>" % VERSION
         )
         header.addWidget(title, 1)
+        self.btn_toolbar = QToolButton()
+        self.btn_toolbar.setAutoRaise(True)
+        self.btn_toolbar.clicked.connect(self.toggle_toolbar)
+        self._sync_toolbar_button()
+        header.addWidget(self.btn_toolbar)
         root.addLayout(header)
 
         def section(title, expanded=True):
@@ -1797,6 +1939,30 @@ class _PanelMixin:
         self.btn_close.clicked.connect(self.close)
         panel_layout.addWidget(self.btn_close)
         self.panel = panel
+
+    def _sync_toolbar_button(self):
+        try:
+            on = toolbar_installed()
+        except Exception:
+            on = False
+        self.btn_toolbar.setText("Remove button" if on else "Add to toolbar")
+        self.btn_toolbar.setToolTip(
+            f"Remove the '{TOOLBAR_NAME}' toolbar" if on else
+            f"Add a '{TOOLBAR_NAME}' toolbar with a button for this macro (all workbenches, "
+            f"shortcut {TOOLBAR_SHORTCUT} if free)")
+
+    def toggle_toolbar(self):
+        try:
+            if toolbar_installed():
+                uninstall_toolbar()
+                App.Console.PrintMessage(f"Live Section: '{TOOLBAR_NAME}' toolbar removed.\n")
+            else:
+                cmd, key = install_toolbar()
+                note = f", shortcut {key}" if key else f" ({TOOLBAR_SHORTCUT} is taken, no shortcut)"
+                App.Console.PrintMessage(f"Live Section: '{TOOLBAR_NAME}' toolbar added{note}.\n")
+        except Exception as e:
+            QMessageBox.warning(None, "Live Section", f"Could not change the toolbar: {e}")
+        self._sync_toolbar_button()
 
     def show_panel(self):
         """Show the options in the Tasks panel (default) or as a dock window."""

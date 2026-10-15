@@ -51,8 +51,9 @@ I will maintain the addon.
 ## Installation
 
 1. Download [`macro/LiveSectionAnalyzer.FCMacro`](macro/LiveSectionAnalyzer.FCMacro).
-2. Copy it into your FreeCAD macro folder (**Macro → Macros…** shows the path; on Linux typically `~/.local/share/FreeCAD/Macro/`).
+2. Copy it into your FreeCAD macro folder (**Macro → Macros…** shows the path; on Linux typically `~/.local/share/FreeCAD/v1-1/Macro/` (FreeCAD 1.1)).
 3. Run it from **Macro → Macros…**.
+4. Optional: press **Add to toolbar** in the panel header. A *Live Section* toolbar with the macro's button appears in every workbench, with the shortcut **Shift+S** if no other command uses it. The same button removes it again.
 
 ## Usage
 
