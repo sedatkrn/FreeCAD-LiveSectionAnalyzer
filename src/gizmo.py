@@ -62,15 +62,6 @@ class PlaneGizmo:
         # so the gizmo itself is never clipped
         self.sg.insertChild(self.root, 0)
 
-        # keep the handles at a constant screen size while zooming
-        self.k = 1.0
-        self._scale_timer = QTimer()
-        self._scale_timer.setInterval(50)
-        self._scale_timer.timeout.connect(self._rescale)
-        if GIZMO_SCREEN_PX > 0:
-            self._rescale()
-            self._scale_timer.start()
-
         self._filter = _GizmoEventFilter(self)
         self.widget.installEventFilter(self._filter)
 
@@ -95,6 +86,7 @@ class PlaneGizmo:
         head_h = L * 0.26
         self.reach = L + head_h
         self._head_h = head_h
+        self.k = 1.0                          # handle scale, set while rendering (_on_render)
 
         # SoAnnotation renders after the scene with depth test off, so the gizmo
         # stays visible even behind semi-transparent geometry
@@ -102,6 +94,12 @@ class PlaneGizmo:
         self.switch = coin.SoSwitch()
         self.switch.whichChild.setValue(coin.SO_SWITCH_ALL)
         self.root.addChild(self.switch)
+
+        # Computes the handle scale from the camera of the frame being drawn, so
+        # zooming never shows a frame with the old size (no popping).
+        self._render_cb = coin.SoCallback()
+        self._render_cb.setCallback(self._on_render)
+        self.switch.addChild(self._render_cb)
 
         grp = coin.SoSeparator()
         self.switch.addChild(grp)
@@ -147,7 +145,9 @@ class PlaneGizmo:
         rings.addChild(rlm)
         self.rtf = coin.SoTransform()
         rings.addChild(self.rtf)
-        self.ring_col, self.ring_coords, self.ring_handle, self.ring_ball = [], [], [], []
+        self.ring_scale = coin.SoScale()          # rings are built at k = 1 and scaled here
+        rings.addChild(self.ring_scale)
+        self.ring_col, self.ring_coords, self.ring_handle = [], [], []
         for k in range(2):
             sep = coin.SoSeparator()
             rings.addChild(sep)
@@ -170,7 +170,6 @@ class PlaneGizmo:
             self.ring_col.append(col)
             self.ring_coords.append(co)
             self.ring_handle.append(ht)
-            self.ring_ball.append(ball)
 
         # arrow, drawn on top of everything
         arrow = coin.SoSeparator()
@@ -205,24 +204,24 @@ class PlaneGizmo:
         L = self.size
         self.k = k
         self.arrow_scale.scaleFactor.setValue(k, k, k)
+        self.ring_scale.scaleFactor.setValue(k, k, k)
         self.reach = (L + self._head_h) * k
         self.ring_rs = (L * k, L * k)
-        for ball in self.ring_ball:
-            ball.radius.setValue(L * 0.06 * k)
-        self._update_rings()
 
-    def _rescale(self):
-        """Keep the arrow GIZMO_SCREEN_PX pixels long (half length) at the plane origin."""
-        if self._removed or GIZMO_SCREEN_PX <= 0:
+    def _on_render(self, _data, action):
+        """SoCallback: keep the arrow GIZMO_SCREEN_PX pixels long (half length)."""
+        if GIZMO_SCREEN_PX <= 0 or not action.isOfType(coin.SoGLRenderAction.getClassTypeId()):
             return
         try:
-            h = max(self.widget.height(), 1) * max(self._squeeze(), 1e-3)
+            state = action.getState()
+            h = max(coin.SoViewportRegionElement.get(state).getViewportSizePixels()[1], 1)
             o = self.origin
-            world = self._volume().getWorldToScreenScale(coin.SbVec3f(o.x, o.y, o.z), GIZMO_SCREEN_PX / h)
+            world = coin.SoViewVolumeElement.get(state).getWorldToScreenScale(
+                coin.SbVec3f(o.x, o.y, o.z), GIZMO_SCREEN_PX / h)
             k = world / max(self.size, 1e-9)
         except Exception:
             return
-        if k > 0 and abs(k - self.k) > 0.01 * self.k:
+        if k > 0 and abs(k - self.k) > 1e-4 * self.k:
             self._apply_scale(k)
 
     def set_extents(self, half_u, half_w):
@@ -235,11 +234,11 @@ class PlaneGizmo:
         """(axis, first basis direction) of the two rotation rings."""
         return ((self.u_axis, self.normal), (self.fixed_axis, self.u_axis))
 
-    def _ring_point(self, k, deg):
+    def _ring_point(self, k, deg, R=None):
         a, e1 = self._ring_defs()[k]
         e2 = a.cross(e1)
         t = math.radians(deg)
-        R = self.ring_rs[k]
+        R = self.ring_rs[k] if R is None else R
         return e1 * (math.cos(t) * R) + e2 * (math.sin(t) * R)
 
     def _update_rings(self):
@@ -248,10 +247,11 @@ class PlaneGizmo:
             hd = self.HANDLE_DEG[k]
             pts = []
             for i in range(self.RING_RES + 1):
-                v = self._ring_point(k, hd - self.ARC_HALF_DEG + 2 * self.ARC_HALF_DEG * i / self.RING_RES)
+                v = self._ring_point(k, hd - self.ARC_HALF_DEG + 2 * self.ARC_HALF_DEG * i / self.RING_RES,
+                                     self.size)
                 pts.append((v.x, v.y, v.z))
             self.ring_coords[k].point.setValues(0, len(pts), pts)
-            h = self._ring_point(k, hd)
+            h = self._ring_point(k, hd, self.size)
             self.ring_handle[k].translation.setValue(h.x, h.y, h.z)
 
     def set_pose(self, origin, normal, u_axis, fixed_axis=None):
@@ -525,10 +525,6 @@ class PlaneGizmo:
             return
         self._removed = True
         self.dragging = False
-        try:
-            self._scale_timer.stop()
-        except Exception:
-            pass
         try:
             self.widget.removeEventFilter(self._filter)
         except Exception:
