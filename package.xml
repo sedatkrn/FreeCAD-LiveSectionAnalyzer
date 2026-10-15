@@ -8,7 +8,7 @@
   <license file="LICENSE">MIT</license>
   <url type="repository" branch="main">https://github.com/sedatkrn/FreeCAD-LiveSectionAnalyzer</url>
   <url type="bugtracker">https://github.com/sedatkrn/FreeCAD-LiveSectionAnalyzer/issues</url>
-  <url type="readme">https://github.com/sedatkrn/FreeCAD-LiveSectionAnalyzer/blob/main/README.md</url>
+  <url type="readme">https://github.com/sedatkrn/FreeCAD-LiveSectionAnalyzer/raw/main/README.md</url>
   <icon>docs/icon.png</icon>
   <content>
     <macro>
