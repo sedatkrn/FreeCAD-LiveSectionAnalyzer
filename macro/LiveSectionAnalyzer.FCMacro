@@ -1281,8 +1281,8 @@ class LiveSectionAnalyzer(QDockWidget):
     # ------------------------------------------------------------------
     # Selected objects that only hold other objects: the part to section is the
     # first child in the selection path.
-    _CONTAINERS = ("App::Part", "Assembly::AssemblyObject", "App::LinkGroup",
-                   "App::DocumentObjectGroup")
+    _CONTAINERS = ("App::Part", "Assembly::AssemblyObject", "Assembly::AssemblyLink",
+                   "App::LinkGroup", "App::DocumentObjectGroup")
 
     @staticmethod
     def _union_bbox(shapes):
@@ -1324,11 +1324,24 @@ class LiveSectionAnalyzer(QDockWidget):
                     target = first
             except Exception:
                 pass
+        if target is not top or top.getParentGeoFeatureGroup() is not None:
+            try:
+                return target, self._global_shape(target)
+            except Exception:
+                pass
         return target, self._solid_or_compound(shape)
 
     def _global_shape(self, obj):
-        """Shape of a scene object with the placements of all its parents."""
-        chain, cur = [], obj
+        """Shape of a scene object with the placements of all its parents.
+
+        The parent placements are multiplied here instead of resolving a subname
+        path with Part.getShape(): for parts inside an Assembly::AssemblyLink that
+        path ignores the link's own placement (moved sub-assemblies left their
+        section behind). Only the Location changes, so the TShape is shared and a
+        pure move is cheap to detect (see _rigid_delta).
+        """
+        shape = Part.getShape(obj, needSubElement=False, refine=False)
+        cur = obj
         while True:
             try:
                 parent = cur.getParentGeoFeatureGroup()
@@ -1336,10 +1349,10 @@ class LiveSectionAnalyzer(QDockWidget):
                 parent = None
             if parent is None:
                 break
-            chain.insert(0, cur.Name)
+            pl = getattr(parent, "Placement", None)
+            if pl is not None:
+                shape.Placement = pl.multiply(shape.Placement)
             cur = parent
-        sub = ".".join(chain) + "." if chain else ""
-        shape = Part.getShape(cur, sub, needSubElement=False, refine=False)
         return self._solid_or_compound(shape)
 
     def _scene_targets(self, skip_keys=()):

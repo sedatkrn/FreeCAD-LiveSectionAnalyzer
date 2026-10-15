@@ -4,6 +4,7 @@
 
 - The plane gizmo is grabbed only by its arrow (`GIZMO_PICK_PLANE = False`); faces under the plane can be selected again.
 - GPU clipping no longer swaps the sectioned objects for `Live_Section_Background` copies: the originals stay visible and selectable (e.g. for Assembly joints). Copies are only used for the boolean cut.
+- Parts inside a moved sub-assembly (`Assembly::AssemblyLink`) no longer leave a "ghost" section behind: parent placements are multiplied explicitly. AssemblyLinks are treated as containers, so each part is listed once.
 - The section follows moving parts (Assembly solver, placement edits): moved meshes are transformed instead of re-tessellated; changed shapes are rebuilt. `FOLLOW_SCENE`, `SCENE_SETTLE_MS`.
 
 ## 0.5.2 – 2026-10-13
