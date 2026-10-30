@@ -2,7 +2,8 @@
 # Mesh section core: pure numpy, no FreeCAD (tests/test_mesh_core.py runs it alone)
 # ----------------------------------------------------------------------
 # BEGIN MESH CORE
-MESH_MAX_QUAD_POINTS = 8000     # finished view: convex-quad fill up to this many loop points
+MESH_MAX_QUAD_POINTS = 20000    # convex-quad fill up to this many loop points
+MESH_INDEX_MIN_TRIS = 2000      # smaller meshes are simply scanned for every plane position
 MESH_MAX_HOLES = 400            # more holes per outer loop: no keyhole bridging (fill skipped)
 def mesh_weld(V, T, sid, tol):
     """Merge coincident vertices of a tessellation.
@@ -68,31 +69,66 @@ def _join_chains(chains, gap):
     return closed, rest
 
 
-def mesh_section_loops(V, T, n, d, gap=0.0):
+def mesh_plane_index(V, T, n, max_bins=4096):
+    """Triangles of a mesh grouped into slabs along n, so that the triangles a plane n.x = d
+    can touch are found without scanning the whole mesh. One index serves one normal.
+    Returns (s, lo, step, starts, ids): s are the vertex heights along n.
+    """
+    s = V @ np.asarray(n, dtype=float)
+    h = s[T]
+    tmin, tmax = h.min(axis=1), h.max(axis=1)
+    lo = float(tmin.min())
+    span = float(tmax.max()) - lo
+    bins = max(1, min(max_bins, len(T) // 8))
+    while True:                                       # long triangles sit in many slabs
+        step = max(span / bins, 1e-300)
+        i0 = np.minimum(((tmin - lo) / step).astype(np.int64), bins - 1)
+        i1 = np.minimum(((tmax - lo) / step).astype(np.int64), bins - 1)
+        count = i1 - i0 + 1
+        if bins == 1 or count.sum() <= 8 * len(T):
+            break
+        bins //= 2
+    tri = np.repeat(np.arange(len(T), dtype=np.int32), count)
+    first = np.cumsum(count) - count
+    slab = np.arange(len(tri), dtype=np.int64) - np.repeat(first, count) + np.repeat(i0, count)
+    ids = tri[np.argsort(slab, kind="stable")]
+    starts = np.concatenate(((0,), np.cumsum(np.bincount(slab, minlength=bins))))
+    return s, lo, step, starts, ids
+
+
+def mesh_section_loops(V, T, n, d, gap=0.0, index=None):
     """Section of a welded mesh with the plane n.x = d.
 
     Every triangle the plane crosses gives one segment; its two cut points are keyed by the
     mesh edge they lie on, so the segments chain into loops without any distance search.
     Vertices exactly on the plane count as lying on the positive side.
     Returns (closed, open): lists of (m, 3) arrays (closed loops do not repeat the first point).
+    index: mesh_plane_index() of this mesh and normal, for big meshes.
     """
     if len(T) == 0:
         return [], []
-    n = np.asarray(n, dtype=float)
-    sv = V @ n - d
-    pos = sv[T] >= 0.0
+    if index is None:
+        s = V @ np.asarray(n, dtype=float)
+        cand = T
+    else:
+        s, lo, step, starts, ids = index
+        k = int((d - lo) / step)
+        if k < 0 or k >= len(starts) - 1:
+            k = max(0, min(k, len(starts) - 2))
+        cand = T[ids[starts[k]:starts[k + 1]]]
+    pos = s[cand] >= d
     cnt = pos.sum(axis=1)
     cut = (cnt == 1) | (cnt == 2)
     if not cut.any():
         return [], []
-    P, sp, one = T[cut], pos[cut], cnt[cut] == 1
+    P, sp, one = cand[cut], pos[cut], cnt[cut] == 1
     lone = np.where(one, sp.argmax(axis=1), (~sp).argmax(axis=1))
     r = np.arange(len(P))
     ia, ib, ic = P[r, lone], P[r, (lone + 1) % 3], P[r, (lone + 2) % 3]
-    sa = sv[ia]
+    sa = s[ia] - d
 
     def cross(io):
-        f = (sa / (sa - sv[io]))[:, None]
+        f = (sa / (s[ia] - s[io]))[:, None]
         return V[ia] + f * (V[io] - V[ia])
 
     nv = len(V)
@@ -279,30 +315,25 @@ def fill_trapezoids(loops):
     x0, y0, x1, y1 = lo[:, 0], lo[:, 1], hi[:, 0], hi[:, 1]
     slope = (x1 - x0) / (y1 - y0)
     ys = np.unique(np.concatenate((y0, y1)))
-    sa, sb = ys[:-1], ys[1:]
-    out = []
-    block = max(1, int(2e7 // len(x0)))                     # slabs per block (bounds the memory)
-    for k0 in range(0, len(sa), block):
-        a, b = sa[k0:k0 + block], sb[k0:k0 + block]
-        si, ei = np.nonzero((y0[None, :] <= a[:, None]) & (y1[None, :] >= b[:, None]))
-        if not len(si):
-            continue
-        xa = x0[ei] + (a[si] - y0[ei]) * slope[ei]
-        xb = x0[ei] + (b[si] - y0[ei]) * slope[ei]
-        o = np.lexsort((xa + xb, si))                       # left to right inside every slab
-        si, xa, xb = si[o], xa[o], xb[o]
-        cnt = np.bincount(si, minlength=len(a))
-        rank = np.arange(len(si)) - (np.cumsum(cnt) - cnt)[si]
-        li = np.flatnonzero((rank % 2 == 0) & (rank + 1 < cnt[si]))
-        if not len(li):
-            continue
-        ri = li + 1
-        q = np.empty((len(li), 4, 2))
-        q[:, 0, 0], q[:, 1, 0], q[:, 2, 0], q[:, 3, 0] = xa[li], xa[ri], xb[ri], xb[li]
-        q[:, 0, 1] = q[:, 1, 1] = a[si[li]]
-        q[:, 2, 1] = q[:, 3, 1] = b[si[li]]
-        out.append(q)
-    return np.concatenate(out) if out else np.zeros((0, 4, 2))
+    a, b = ys[:-1], ys[1:]
+    # every edge spans a run of slabs (its ends are slab borders)
+    i0 = np.searchsorted(ys, y0)
+    count = np.searchsorted(ys, y1) - i0
+    ei = np.repeat(np.arange(len(x0)), count)
+    si = np.arange(len(ei)) - np.repeat(np.cumsum(count) - count, count) + np.repeat(i0, count)
+    xa = x0[ei] + (a[si] - y0[ei]) * slope[ei]
+    xb = x0[ei] + (b[si] - y0[ei]) * slope[ei]
+    o = np.lexsort((xa + xb, si))                           # left to right inside every slab
+    si, xa, xb = si[o], xa[o], xb[o]
+    cnt = np.bincount(si, minlength=len(a))
+    rank = np.arange(len(si)) - (np.cumsum(cnt) - cnt)[si]
+    li = np.flatnonzero((rank % 2 == 0) & (rank + 1 < cnt[si]))
+    ri = li + 1
+    q = np.empty((len(li), 4, 2))
+    q[:, 0, 0], q[:, 1, 0], q[:, 2, 0], q[:, 3, 0] = xa[li], xa[ri], xb[ri], xb[li]
+    q[:, 0, 1] = q[:, 1, 1] = a[si[li]]
+    q[:, 2, 1] = q[:, 3, 1] = b[si[li]]
+    return q
 
 
 def hatch_segments(loops, angle_deg, spacing, max_lines=1500):

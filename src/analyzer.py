@@ -294,7 +294,7 @@ class LiveSectionAnalyzer(_SceneMixin, _PanelMixin, _GeometryMixin, _MeshSection
 
         total = time.perf_counter() - t_start
         # adaptive delay: after a slow update give the UI more time to collect events
-        self._timer.setInterval(int(min(250, max(60, total * 300))))
+        self._timer.setInterval(int(min(250, max(16 if quick else 60, total * 300))))
 
         if DEBUG_TIMING:
             App.Console.PrintMessage(

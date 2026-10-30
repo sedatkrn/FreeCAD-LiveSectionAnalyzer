@@ -24,6 +24,7 @@ exec(compile(CORE, "mesh_core", "exec"), NS)
 
 mesh_weld = NS["mesh_weld"]
 mesh_section_loops = NS["mesh_section_loops"]
+mesh_plane_index = NS["mesh_plane_index"]
 loop_nesting = NS["loop_nesting"]
 fill_polygons = NS["fill_polygons"]
 hatch_segments = NS["hatch_segments"]
@@ -406,6 +407,40 @@ class TrapezoidFillTests(unittest.TestCase):
         t0 = time.perf_counter()
         fill_trapezoids(loops)
         self.assertLess(time.perf_counter() - t0, 1.5)
+
+
+class PlaneIndexTests(unittest.TestCase):
+    NORMALS = ((1, 0, 0), (0, 1, 0), (0, 0, 1), (0.6, 0.0, 0.8), (0.48, 0.6, 0.64))
+
+    def check(self, V, T):
+        for n in self.NORMALS:
+            n = np.array(n, dtype=float)
+            s = V @ n
+            index = mesh_plane_index(V, T, n)
+            # random heights, exact vertex heights and planes outside the mesh
+            ds = np.concatenate((np.linspace(s.min() - 1, s.max() + 1, 37), s[:: max(1, len(s) // 25)]))
+            for d in ds:
+                closed_a, open_a = mesh_section_loops(V, T, n, d, 1e-6)
+                closed_b, open_b = mesh_section_loops(V, T, n, d, 1e-6, index)
+                self.assertEqual(len(closed_a), len(closed_b))
+                self.assertEqual(len(open_a), len(open_b))
+                for a, b in zip(closed_a + open_a, closed_b + open_b):
+                    self.assertEqual(sorted(map(tuple, a.round(9))), sorted(map(tuple, b.round(9))))
+
+    def test_torus_matches_the_full_scan(self):
+        self.check(*welded(*torus_mesh(10.0, 3.0, 48, 24)))
+
+    def test_long_triangles_match_the_full_scan(self):
+        self.check(*welded(*star_mesh(24, 20.0, 15.0, 40.0)[:2]))
+
+    def test_box_matches_the_full_scan(self):
+        self.check(*welded(*box_mesh(3.0, 5.0, 7.0)))
+
+    def test_candidates_are_few_on_a_fine_mesh(self):
+        V, T = welded(*torus_mesh(10.0, 3.0, 300, 200))
+        s, lo, step, starts, ids = mesh_plane_index(V, T, np.array((0.0, 0.0, 1.0)))
+        k = int((0.5 - lo) / step)
+        self.assertLess(starts[k + 1] - starts[k], len(T) / 5)
 
 
 if __name__ == "__main__":

@@ -186,11 +186,28 @@ class _MeshSectionMixin:
         hit = self._loop_cache.get(key)
         if hit is None:
             V, T, gap = self._mesh_for(t, fine)
-            hit = mesh_section_loops(V, T, np.array((normal.x, normal.y, normal.z)), d, gap)
+            n = (normal.x, normal.y, normal.z)
+            hit = mesh_section_loops(V, T, np.array(n), d, gap, self._plane_index(t, fine, V, T, n))
             if len(self._loop_cache) >= MESH_CACHE_SIZE:
                 self._loop_cache.pop(next(iter(self._loop_cache)))
             self._loop_cache[key] = hit
         return hit
+
+    @staticmethod
+    def _plane_index(t, fine, V, T, n):
+        """Slab index of a big mesh once the same normal is used twice in a row: moving the
+        plane reuses it, while tilting (a new normal every update) stays a plain scan."""
+        if len(T) < MESH_INDEX_MIN_TRIS:
+            return None
+        nkey = tuple(round(c, 6) for c in n)
+        entry = t.plane_index.get(fine)
+        if entry is None or entry[0] is not V or entry[1] != nkey:
+            t.plane_index[fine] = (V, nkey, None)
+            return None
+        if entry[2] is None:
+            entry = (V, nkey, mesh_plane_index(V, T, n))
+            t.plane_index[fine] = entry
+        return entry[2]
 
     def _fill_quads(self, key, loops):
         """Convex quads of the section fill (cached); see fill_trapezoids()."""
@@ -290,15 +307,15 @@ class _MeshSectionMixin:
                 npts = sum(len(L) for L in loops)
                 shade = tuple(c * 0.75 for c in t.color[:3]) if obj_colors else flat
                 if npts <= MESH_MAX_FILL_POINTS:
-                    if fine and npts <= MESH_MAX_QUAD_POINTS:
-                        tkey = (t.key, round(normal.x, 6), round(normal.y, 6), round(normal.z, 6), round(d, 4))
+                    if npts <= MESH_MAX_QUAD_POINTS:
+                        tkey = (t.key, fine, round(normal.x, 6), round(normal.y, 6), round(normal.z, 6), round(d, 4))
                         quads = self._fill_quads(tkey, loops)             # convex quads: no tearing
                         if len(quads):
                             fill.append(to3(quads.reshape(-1, 2)))        # one transform for all quads
                             fill_counts.extend([4] * len(quads))
                             fill_cols.extend([shade] * len(quads))
                     else:
-                        for p in fill_polygons(loops):                    # drag / huge sections
+                        for p in fill_polygons(loops):                    # huge sections
                             fill.append(to3(p))
                             fill_counts.append(len(p))
                             fill_cols.append(shade)

@@ -36,6 +36,7 @@ class _Target:
         self.slice_ms = 0.0         # duration of the last exact slice
         self.mesh = None            # (vertices, triangles) numpy arrays, built on demand
         self.meshes = {}            # welded meshes for the mesh section: 0 = coarse, 1 = fine
+        self.plane_index = {}       # fine -> (vertices, normal, mesh_plane_index()), see _plane_index
         self.bg_feat = None
         self.bg_mode = None
         self.was_visible = True
