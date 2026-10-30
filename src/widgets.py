@@ -1,3 +1,11 @@
+def _hide_in_tree(feat):
+    """Keep a helper object out of the tree view; big documents stay readable."""
+    try:
+        feat.ViewObject.ShowInTree = False
+    except Exception:
+        pass                  # older FreeCAD: the object just stays listed
+
+
 class _Collapsible(QWidget):
     """A titled section that can be folded to keep the panel short."""
 
@@ -19,7 +27,7 @@ class _Collapsible(QWidget):
 
         self.body = QWidget()
         self.body_layout = QVBoxLayout(self.body)
-        self.body_layout.setContentsMargins(12, 0, 0, 4)
+        self.body_layout.setContentsMargins(6, 0, 0, 4)
         outer.addWidget(self.body)
 
         line = QFrame()

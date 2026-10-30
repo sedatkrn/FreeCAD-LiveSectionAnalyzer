@@ -114,6 +114,7 @@ class LiveSectionAnalyzer(_SceneMixin, _PanelMixin, _GeometryMixin, _MeshSection
                 self.clip_ok = False
 
         for feat in (self.section_feat, self.edge_feat, self.hatch_feat):
+            _hide_in_tree(feat)
             feat.purgeTouched()
 
     # ------------------------------------------------------------------

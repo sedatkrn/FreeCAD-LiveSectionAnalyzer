@@ -55,6 +55,9 @@ PANEL_MODE = "dock"
 # or float it by double-clicking its title.
 DOCK_AREA = "right"
 
+# Width the dock opens with, in pixels; it can be dragged wider afterwards.
+PANEL_WIDTH = 315
+
 # If the wrong half of the object is clipped away, flip this value.
 CLIP_KEEP_NEGATIVE = True
 

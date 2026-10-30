@@ -1,5 +1,12 @@
 # Changelog
 
+## Unreleased
+
+- Narrower options panel: shorter labels (the details moved to tooltips) and smaller header and buttons.
+- Background, Section Fill, Edge Lines and Hatch start folded.
+- The `Live_*` helper objects no longer appear in the tree view.
+- Hatch spacing goes up to 500 mm (was 20 mm) for big objects; the default stays 3 mm.
+
 ## 0.7.0 – 2026-10-15
 
 - **Add to toolbar** button in the panel header: registers the macro as a command with its icon on a global *Live Section* toolbar (all workbenches) and assigns **Shift+S** when free. Pressing it again removes the toolbar.

@@ -36,7 +36,7 @@
 1. [`macro/LiveSectionAnalyzer.FCMacro`](macro/LiveSectionAnalyzer.FCMacro) dosyasını indirin.
 2. FreeCAD makro klasörüne kopyalayın (**Makro → Makrolar…** yolu gösterir; Linux'ta genelde `~/.local/share/FreeCAD/v1-1/Macro/` (FreeCAD 1.1)).
 3. **Makro → Makrolar…** üzerinden çalıştırın.
-4. İsteğe bağlı: paneldeki **Add to toolbar** düğmesine basın. Her workbench'te görünen bir *Live Section* araç çubuğu ve düğmesi eklenir; **Shift+S** boştaysa kısayol olarak atanır. Aynı düğme kaldırır.
+4. İsteğe bağlı: paneldeki **+ Toolbar** düğmesine basın. Her workbench'te görünen bir *Live Section* araç çubuğu ve düğmesi eklenir; **Shift+S** boştaysa kısayol olarak atanır. Aynı düğme kaldırır.
 
 Gelecek planlar için: [docs/ROADMAP.md](docs/ROADMAP.md)
 

@@ -31,8 +31,8 @@ class _GeometryMixin:
             ptype, n0, u0, w0 = "XY", App.Vector(0, 0, 1), App.Vector(1, 0, 0), App.Vector(0, 1, 0)
         ta, tb = self.spin_tilt_a.value(), self.spin_tilt_b.value()
         names = {"YZ": ("Y", "Z"), "XZ": ("X", "Z"), "XY": ("X", "Y")}[ptype]
-        self.lbl_tilt_a.setText("Tilt about %s:" % names[0])
-        self.lbl_tilt_b.setText("Tilt about %s:" % names[1])
+        self.lbl_tilt_a.setText("Tilt %s:" % names[0])
+        self.lbl_tilt_b.setText("Tilt %s:" % names[1])
         n, u, w = App.Vector(n0), App.Vector(u0), App.Vector(w0)
         if abs(ta) > 1e-9 or abs(tb) > 1e-9:
             rot = App.Rotation(w0, tb).multiply(App.Rotation(u0, ta))

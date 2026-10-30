@@ -8,15 +8,15 @@ class _PanelMixin:
 
         # --- HEADER: logo, title, version ---
         header = QHBoxLayout()
-        pm = _logo_pixmap(40)
+        pm = _logo_pixmap(32)
         if pm is not None:
             logo = QLabel()
             logo.setPixmap(pm)
-            logo.setFixedSize(44, 44)
+            logo.setFixedSize(36, 36)
             header.addWidget(logo)
         title = QLabel(
             "<b>Live Section Analyzer</b><br>"
-            "<span style='color: #777; font-size: 10px;'>FreeCAD clipping macro  v%s</span>" % VERSION
+            "<span style='color: #777; font-size: 10px;'>v%s</span>" % VERSION
         )
         header.addWidget(title, 1)
         self.btn_toolbar = QToolButton()
@@ -45,6 +45,7 @@ class _PanelMixin:
                            ("None", lambda: self._check_all(False)),
                            ("Refresh", self.rescan_objects)):
             b = QPushButton(text)
+            b.setMinimumWidth(0)
             b.clicked.connect(slot)
             row.addWidget(b)
         layout.addLayout(row)
@@ -62,7 +63,8 @@ class _PanelMixin:
         layout.addWidget(self.radio_xz)
         layout.addWidget(self.radio_yz)
 
-        self.chk_gizmo = QCheckBox("Show plane gizmo (drag the arrow in the 3D view)")
+        self.chk_gizmo = QCheckBox("Show plane gizmo")
+        self.chk_gizmo.setToolTip("Drag the arrow in the 3D view to move the plane")
         self.chk_gizmo.setChecked(True)
         self.chk_gizmo.stateChanged.connect(self.on_gizmo_toggled)
         layout.addWidget(self.chk_gizmo)
@@ -82,6 +84,7 @@ class _PanelMixin:
             tilt_layout.addWidget(lbl)
             tilt_layout.addWidget(sp)
         self.btn_tilt_reset = QPushButton("Reset")
+        self.btn_tilt_reset.setMinimumWidth(0)
         self.btn_tilt_reset.setToolTip("Back to the axis-aligned plane")
         self.btn_tilt_reset.clicked.connect(self.reset_tilt)
         tilt_layout.addWidget(self.btn_tilt_reset)
@@ -89,12 +92,12 @@ class _PanelMixin:
 
         # Section engine (part of the Section Plane group)
         mesh_ok = HAS_NP and self.mesh_switch is not None
-        self.chk_mesh = QCheckBox("Mesh-based section (fast, curves are polygonal)")
+        self.chk_mesh = QCheckBox("Mesh-based section")
         self.chk_mesh.setChecked(bool(MESH_SECTION) and mesh_ok)
         self.chk_mesh.setEnabled(mesh_ok)
         self.chk_mesh.setToolTip(
             "Builds outline, hatch and fill from the tessellation instead of OpenCascade: "
-            "much faster on big or curved parts. Each object gets its own hatch angle and "
+            "much faster on big or curved parts, but curves are polygonal. Each object gets its own hatch angle and "
             "spacing. Freeze Section always uses exact geometry."
         )
         layout.addWidget(self.chk_mesh)
@@ -125,12 +128,13 @@ class _PanelMixin:
 
         layout.addLayout(offset_layout)
 
-        range_label = QLabel(f"<i>Offset range: ±{self.offset_range:.1f} mm (based on object size)</i>")
+        range_label = QLabel(f"<i>Range: ±{self.offset_range:.1f} mm</i>")
         range_label.setStyleSheet("color: #666; font-size: 10px;")
+        range_label.setToolTip("Based on the object size")
         layout.addWidget(range_label)
 
         # --- BACKGROUND SETTINGS ---
-        layout = section("Background")
+        layout = section("Background", expanded=False)
 
         trans_layout = QHBoxLayout()
         trans_layout.addWidget(QLabel("Transparency (%):"))
@@ -155,14 +159,15 @@ class _PanelMixin:
         layout.addLayout(gpu_layout)
 
         mirror_layout = QHBoxLayout()
-        self.chk_mirror_bg = QCheckBox("Mirror Background (show opposite half)")
+        self.chk_mirror_bg = QCheckBox("Mirror Background")
+        self.chk_mirror_bg.setToolTip("Show the opposite half")
         self.chk_mirror_bg.setChecked(False)
         mirror_layout.addWidget(self.chk_mirror_bg)
         mirror_layout.addStretch()
         layout.addLayout(mirror_layout)
 
         # --- SECTION FILL ---
-        layout = section("Section Fill")
+        layout = section("Section Fill", expanded=False)
 
         # With GPU clipping the cut is open, so the fill acts as the cap: default on.
         self.chk_section_fill = QCheckBox("Show Section Fill")
@@ -184,7 +189,7 @@ class _PanelMixin:
         layout.addLayout(fill_color_layout)
 
         # --- EDGE LINE SETTINGS ---
-        layout = section("Edge Lines")
+        layout = section("Edge Lines", expanded=False)
 
         self.chk_edges = QCheckBox("Show Edge Lines")
         self.chk_edges.setChecked(True)
@@ -210,7 +215,7 @@ class _PanelMixin:
         layout.addLayout(edge_width_layout)
 
         # --- HATCH SETTINGS ---
-        layout = section("Hatch")
+        layout = section("Hatch", expanded=False)
 
         self.chk_hatch = QCheckBox("Enable Hatch")
         self.chk_hatch.setChecked(True)
@@ -219,7 +224,7 @@ class _PanelMixin:
         spacing_layout = QHBoxLayout()
         spacing_layout.addWidget(QLabel("Spacing (mm):"))
         self.spin_spacing = QDoubleSpinBox()
-        self.spin_spacing.setRange(0.5, 20.0)
+        self.spin_spacing.setRange(0.5, 500.0)
         self.spin_spacing.setValue(3.0)
         self.spin_spacing.setSingleStep(0.5)
         spacing_layout.addWidget(self.spin_spacing)
@@ -256,7 +261,8 @@ class _PanelMixin:
         layout.addLayout(hatch_point_layout)
 
         # --- FREEZE BUTTON ---
-        self.btn_freeze = QPushButton("❄️ Freeze Section (Simple Copy with Folder)")
+        self.btn_freeze = QPushButton("❄️ Freeze Section")
+        self.btn_freeze.setToolTip("Simple copy of the section, in its own folder")
         self.btn_freeze.setStyleSheet("""
             QPushButton {
                 background-color: #4CAF50;
@@ -344,7 +350,7 @@ class _PanelMixin:
             on = toolbar_installed()
         except Exception:
             on = False
-        self.btn_toolbar.setText("Remove button" if on else "Add to toolbar")
+        self.btn_toolbar.setText("− Toolbar" if on else "+ Toolbar")
         self.btn_toolbar.setToolTip(
             f"Remove the '{TOOLBAR_NAME}' toolbar" if on else
             f"Add a '{TOOLBAR_NAME}' toolbar with a button for this macro (all workbenches, "
@@ -383,11 +389,14 @@ class _PanelMixin:
         pm = _logo_pixmap()
         if pm is not None:
             self.setWindowIcon(QIcon(pm))
-        self.panel.setMinimumWidth(300)
+        self.panel.setMinimumWidth(PANEL_WIDTH)
         self.setWidget(self.panel)
         area = Qt.LeftDockWidgetArea if str(DOCK_AREA).lower() == "left" else Qt.RightDockWidgetArea
-        Gui.getMainWindow().addDockWidget(area, self)
+        mw = Gui.getMainWindow()
+        mw.addDockWidget(area, self)
         self.show()
+        # Otherwise the dock inherits whatever width its side of the window last had
+        mw.resizeDocks([self], [PANEL_WIDTH], Qt.Horizontal)
 
     # ------------------------------------------------------------------
     # UI event handlers (cheap: they never do geometry work directly)
@@ -608,6 +617,7 @@ class _PanelMixin:
             elif t.checked and t.bg_feat is None:
                 t.was_visible = bool(t.obj.ViewObject.Visibility)
                 feat = doc.addObject("Part::Feature", "Live_Section_Background")
+                _hide_in_tree(feat)
                 feat.ViewObject.ShapeColor = t.color
                 feat.ViewObject.DisplayMode = "Shaded"
                 feat.ViewObject.Transparency = trans
