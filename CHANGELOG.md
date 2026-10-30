@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.8.0 – 2026-10-30
 
 - Narrower options panel: shorter labels (the details moved to tooltips) and smaller header and buttons.
 - Background, Section Fill, Edge Lines and Hatch start folded.
