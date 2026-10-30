@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.8.1 – 2026-10-30
 
 - Faster dragging on big models: the triangles are grouped along the plane normal, so an update no longer scans the whole mesh, the fill is computed without a slabs-by-edges table, and the panel waits less between drag updates.
 - Section fill no longer tears while the plane is being dragged: the drag now uses the same convex-quad fill as the finished view (`MESH_MAX_QUAD_POINTS`, now 20000 points).

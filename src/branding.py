@@ -1,5 +1,5 @@
 
-VERSION = "0.8.0"
+VERSION = "0.8.1"
 
 # Project icon (96 px PNG), shown in the panel header and as the dock icon. docs/icon.png is
 # the 256 px source, docs/logo.png the full logo with the title.

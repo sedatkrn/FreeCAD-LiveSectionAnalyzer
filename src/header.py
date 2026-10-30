@@ -4,7 +4,7 @@ Interactive, real-time section analysis for FreeCAD.
 Select a solid, run the macro, and move the section plane with a slider,
 a spin box or by dragging a gizmo directly in the 3D view.
 
-Version: 0.8.0   (keep in sync with VERSION below)
+Version: 0.8.1   (keep in sync with VERSION below)
 Author: Sedat Kuran
 License: MIT (see LICENSE)
 Repository: https://github.com/sedatkrn/FreeCAD-LiveSectionAnalyzer
