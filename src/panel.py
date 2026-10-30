@@ -54,14 +54,13 @@ class _PanelMixin:
 
         # --- SECTION PLANE ---
         layout = section("Section Plane")
-        self.radio_xy = QRadioButton("XY Plane")
-        self.radio_xz = QRadioButton("XZ Plane")
-        self.radio_yz = QRadioButton("YZ Plane (Default)")
-        self.radio_yz.setChecked(True)
-
-        layout.addWidget(self.radio_xy)
-        layout.addWidget(self.radio_xz)
-        layout.addWidget(self.radio_yz)
+        plane_layout = QHBoxLayout()
+        plane_layout.addWidget(QLabel("Plane:"))
+        self.combo_plane = QComboBox()
+        self.combo_plane.addItems(["XY", "XZ", "YZ"])
+        self.combo_plane.setCurrentText("YZ")
+        plane_layout.addWidget(self.combo_plane, 1)
+        layout.addLayout(plane_layout)
 
         self.chk_gizmo = QCheckBox("Show plane gizmo")
         self.chk_gizmo.setToolTip("Drag the arrow in the 3D view to move the plane")
@@ -102,13 +101,12 @@ class _PanelMixin:
         )
         layout.addWidget(self.chk_mesh)
 
-        # --- OFFSET ---
-        layout = section("Offset (Position)")
-
+        # Offset (part of the Section Plane group)
         max_dim = max(self.x_len, self.y_len, self.z_len)
         self.offset_range = max(max_dim * 0.6, 10.0)
 
         offset_layout = QHBoxLayout()
+        offset_layout.addWidget(QLabel("Offset:"))
 
         self.slider = QSlider(Qt.Horizontal)
         self.slider.setRange(-100, 100)
@@ -133,9 +131,7 @@ class _PanelMixin:
         range_label.setToolTip("Based on the object size")
         layout.addWidget(range_label)
 
-        # --- BACKGROUND SETTINGS ---
-        layout = section("Background", expanded=False)
-
+        # Background (part of the Section Plane group)
         trans_layout = QHBoxLayout()
         trans_layout.addWidget(QLabel("Transparency (%):"))
         self.spin_trans = QSpinBox()
@@ -278,10 +274,7 @@ class _PanelMixin:
         self.btn_freeze.clicked.connect(self.freeze_section)
 
         # --- CONNECTIONS ---
-        # Plane radios: only react to the button that became checked
-        self.radio_xy.toggled.connect(self.on_plane_toggled)
-        self.radio_xz.toggled.connect(self.on_plane_toggled)
-        self.radio_yz.toggled.connect(self.on_plane_toggled)
+        self.combo_plane.currentIndexChanged.connect(self.schedule_update)
 
         self.slider.valueChanged.connect(self.on_slider_changed)
         self.slider.sliderReleased.connect(self.schedule_update)   # full update after drag
@@ -443,10 +436,6 @@ class _PanelMixin:
             t.checked = bool(flag)
         self.schedule_update()
 
-    def on_plane_toggled(self, checked):
-        if checked:
-            self.schedule_update()
-
     def on_slider_changed(self, value):
         """Slider -> spinbox (signals blocked to avoid the feedback loop)"""
         mapped_value = (value / 100.0) * self.offset_range
@@ -580,6 +569,7 @@ class _PanelMixin:
         for t in self.targets:
             if t.bg_feat is not None:
                 self._set(t.bg_feat.ViewObject, "Transparency", self.spin_trans.value())
+        self._sync_clip_transparency(self.clip_ok and self.chk_gpu_clip.isChecked())
         self._set(self.edge_feat.ViewObject, "LineWidth", self.edge_width_spin.value())
         self._set(self.hatch_feat.ViewObject, "LineWidth", self.hatch_width_spin.value())
         self._set(self.hatch_feat.ViewObject, "PointSize", self.hatch_point_spin.value())
@@ -587,6 +577,37 @@ class _PanelMixin:
 
     def _vis(self, feat, flag):
         self._set(feat.ViewObject, "Visibility", bool(flag))
+
+    def _sync_clip_transparency(self, use_clip):
+        """GPU clipping shows the originals, so the transparency goes on them directly.
+        0 % leaves an object as the user made it."""
+        trans = self.spin_trans.value()
+        for t in self.targets:
+            if use_clip and t.checked and trans > 0:
+                self._apply_transparency(t, trans)
+            else:
+                self._restore_transparency(t)
+
+    def _apply_transparency(self, t, trans):
+        try:
+            vo = t.obj.ViewObject
+            if t.saved_look is None:
+                t.saved_look = {p: getattr(vo, p) for p in ("Transparency", "ShapeAppearance", "DiffuseColor")
+                                if hasattr(vo, p)}
+            self._set(vo, "Transparency", trans)
+        except Exception:
+            pass
+
+    def _restore_transparency(self, t):
+        """Put back the object's own look, per-face colors included."""
+        if t.saved_look is None:
+            return
+        look, t.saved_look = t.saved_look, None
+        try:
+            for prop, value in look.items():
+                setattr(t.obj.ViewObject, prop, value)
+        except Exception:
+            pass
 
     def _release(self, t):
         """Remove a target's background copy and show the original again."""
@@ -611,6 +632,7 @@ class _PanelMixin:
         if not doc:
             return
         trans = self.spin_trans.value() if hasattr(self, "spin_trans") else 70
+        self._sync_clip_transparency(use_clip)
         for t in self.targets:
             if use_clip:
                 self._release(t)

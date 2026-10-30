@@ -23,12 +23,13 @@ class _GeometryMixin:
         """
         offset_val = self.offset_spin.value()
         c = self.bbox.Center
-        if self.radio_yz.isChecked():
-            ptype, n0, u0, w0 = "YZ", App.Vector(1, 0, 0), App.Vector(0, 1, 0), App.Vector(0, 0, 1)
-        elif self.radio_xz.isChecked():
-            ptype, n0, u0, w0 = "XZ", App.Vector(0, 1, 0), App.Vector(1, 0, 0), App.Vector(0, 0, 1)
+        ptype = self.combo_plane.currentText()
+        if ptype == "YZ":
+            n0, u0, w0 = App.Vector(1, 0, 0), App.Vector(0, 1, 0), App.Vector(0, 0, 1)
+        elif ptype == "XZ":
+            n0, u0, w0 = App.Vector(0, 1, 0), App.Vector(1, 0, 0), App.Vector(0, 0, 1)
         else:
-            ptype, n0, u0, w0 = "XY", App.Vector(0, 0, 1), App.Vector(1, 0, 0), App.Vector(0, 1, 0)
+            n0, u0, w0 = App.Vector(0, 0, 1), App.Vector(1, 0, 0), App.Vector(0, 1, 0)
         ta, tb = self.spin_tilt_a.value(), self.spin_tilt_b.value()
         names = {"YZ": ("Y", "Z"), "XZ": ("X", "Z"), "XY": ("X", "Y")}[ptype]
         self.lbl_tilt_a.setText("Tilt %s:" % names[0])

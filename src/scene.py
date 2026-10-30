@@ -151,6 +151,7 @@ class _SceneMixin:
         keys = {t.key for t in kept}
         dropped = [t for t in self.targets if not t.checked]
         for t in dropped:
+            self._restore_transparency(t)
             self._release(t)
         self.targets = kept + self._scene_targets(skip_keys=keys)
         self._fill_list()

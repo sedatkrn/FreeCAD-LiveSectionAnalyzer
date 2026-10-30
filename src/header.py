@@ -21,7 +21,7 @@ import time
 
 from PySide.QtWidgets import (
     QColorDialog, QDockWidget, QDoubleSpinBox, QMessageBox, QLabel, QCheckBox,
-    QRadioButton, QPushButton, QSlider, QSpinBox, QWidget,
+    QComboBox, QPushButton, QSlider, QSpinBox, QWidget,
     QHBoxLayout, QVBoxLayout, QScrollArea, QToolButton, QFrame,
     QDialogButtonBox, QSizePolicy, QListWidget, QListWidgetItem, QApplication, QProgressDialog,
 )

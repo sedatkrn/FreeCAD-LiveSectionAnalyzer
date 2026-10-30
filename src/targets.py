@@ -6,6 +6,13 @@ class _SceneObserver:
     def __init__(self, owner):
         self.owner = owner
 
+    def slotDeletedDocument(self, doc):
+        try:
+            if doc.Name == self.owner._doc_name:
+                self.owner.on_document_closed()
+        except Exception:
+            pass
+
     def slotChangedObject(self, obj, prop):
         try:
             if prop not in self.PROPS or obj.Name.startswith(("Live_", "Section_")):
@@ -32,6 +39,7 @@ class _Target:
         self.bg_feat = None
         self.bg_mode = None
         self.was_visible = True
+        self.saved_look = None      # the object's own look while GPU clipping tints it
         self.src = None             # (top object, subname) when picked from the selection
 
 

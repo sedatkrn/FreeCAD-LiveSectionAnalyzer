@@ -21,7 +21,7 @@ import time
 
 from PySide.QtWidgets import (
     QColorDialog, QDockWidget, QDoubleSpinBox, QMessageBox, QLabel, QCheckBox,
-    QRadioButton, QPushButton, QSlider, QSpinBox, QWidget,
+    QComboBox, QPushButton, QSlider, QSpinBox, QWidget,
     QHBoxLayout, QVBoxLayout, QScrollArea, QToolButton, QFrame,
     QDialogButtonBox, QSizePolicy, QListWidget, QListWidgetItem, QApplication, QProgressDialog,
 )
@@ -1331,6 +1331,13 @@ class _SceneObserver:
     def __init__(self, owner):
         self.owner = owner
 
+    def slotDeletedDocument(self, doc):
+        try:
+            if doc.Name == self.owner._doc_name:
+                self.owner.on_document_closed()
+        except Exception:
+            pass
+
     def slotChangedObject(self, obj, prop):
         try:
             if prop not in self.PROPS or obj.Name.startswith(("Live_", "Section_")):
@@ -1357,6 +1364,7 @@ class _Target:
         self.bg_feat = None
         self.bg_mode = None
         self.was_visible = True
+        self.saved_look = None      # the object's own look while GPU clipping tints it
         self.src = None             # (top object, subname) when picked from the selection
 
 
@@ -1513,6 +1521,7 @@ class _SceneMixin:
         keys = {t.key for t in kept}
         dropped = [t for t in self.targets if not t.checked]
         for t in dropped:
+            self._restore_transparency(t)
             self._release(t)
         self.targets = kept + self._scene_targets(skip_keys=keys)
         self._fill_list()
@@ -1666,14 +1675,13 @@ class _PanelMixin:
 
         # --- SECTION PLANE ---
         layout = section("Section Plane")
-        self.radio_xy = QRadioButton("XY Plane")
-        self.radio_xz = QRadioButton("XZ Plane")
-        self.radio_yz = QRadioButton("YZ Plane (Default)")
-        self.radio_yz.setChecked(True)
-
-        layout.addWidget(self.radio_xy)
-        layout.addWidget(self.radio_xz)
-        layout.addWidget(self.radio_yz)
+        plane_layout = QHBoxLayout()
+        plane_layout.addWidget(QLabel("Plane:"))
+        self.combo_plane = QComboBox()
+        self.combo_plane.addItems(["XY", "XZ", "YZ"])
+        self.combo_plane.setCurrentText("YZ")
+        plane_layout.addWidget(self.combo_plane, 1)
+        layout.addLayout(plane_layout)
 
         self.chk_gizmo = QCheckBox("Show plane gizmo")
         self.chk_gizmo.setToolTip("Drag the arrow in the 3D view to move the plane")
@@ -1714,13 +1722,12 @@ class _PanelMixin:
         )
         layout.addWidget(self.chk_mesh)
 
-        # --- OFFSET ---
-        layout = section("Offset (Position)")
-
+        # Offset (part of the Section Plane group)
         max_dim = max(self.x_len, self.y_len, self.z_len)
         self.offset_range = max(max_dim * 0.6, 10.0)
 
         offset_layout = QHBoxLayout()
+        offset_layout.addWidget(QLabel("Offset:"))
 
         self.slider = QSlider(Qt.Horizontal)
         self.slider.setRange(-100, 100)
@@ -1745,9 +1752,7 @@ class _PanelMixin:
         range_label.setToolTip("Based on the object size")
         layout.addWidget(range_label)
 
-        # --- BACKGROUND SETTINGS ---
-        layout = section("Background", expanded=False)
-
+        # Background (part of the Section Plane group)
         trans_layout = QHBoxLayout()
         trans_layout.addWidget(QLabel("Transparency (%):"))
         self.spin_trans = QSpinBox()
@@ -1890,10 +1895,7 @@ class _PanelMixin:
         self.btn_freeze.clicked.connect(self.freeze_section)
 
         # --- CONNECTIONS ---
-        # Plane radios: only react to the button that became checked
-        self.radio_xy.toggled.connect(self.on_plane_toggled)
-        self.radio_xz.toggled.connect(self.on_plane_toggled)
-        self.radio_yz.toggled.connect(self.on_plane_toggled)
+        self.combo_plane.currentIndexChanged.connect(self.schedule_update)
 
         self.slider.valueChanged.connect(self.on_slider_changed)
         self.slider.sliderReleased.connect(self.schedule_update)   # full update after drag
@@ -2055,10 +2057,6 @@ class _PanelMixin:
             t.checked = bool(flag)
         self.schedule_update()
 
-    def on_plane_toggled(self, checked):
-        if checked:
-            self.schedule_update()
-
     def on_slider_changed(self, value):
         """Slider -> spinbox (signals blocked to avoid the feedback loop)"""
         mapped_value = (value / 100.0) * self.offset_range
@@ -2192,6 +2190,7 @@ class _PanelMixin:
         for t in self.targets:
             if t.bg_feat is not None:
                 self._set(t.bg_feat.ViewObject, "Transparency", self.spin_trans.value())
+        self._sync_clip_transparency(self.clip_ok and self.chk_gpu_clip.isChecked())
         self._set(self.edge_feat.ViewObject, "LineWidth", self.edge_width_spin.value())
         self._set(self.hatch_feat.ViewObject, "LineWidth", self.hatch_width_spin.value())
         self._set(self.hatch_feat.ViewObject, "PointSize", self.hatch_point_spin.value())
@@ -2199,6 +2198,37 @@ class _PanelMixin:
 
     def _vis(self, feat, flag):
         self._set(feat.ViewObject, "Visibility", bool(flag))
+
+    def _sync_clip_transparency(self, use_clip):
+        """GPU clipping shows the originals, so the transparency goes on them directly.
+        0 % leaves an object as the user made it."""
+        trans = self.spin_trans.value()
+        for t in self.targets:
+            if use_clip and t.checked and trans > 0:
+                self._apply_transparency(t, trans)
+            else:
+                self._restore_transparency(t)
+
+    def _apply_transparency(self, t, trans):
+        try:
+            vo = t.obj.ViewObject
+            if t.saved_look is None:
+                t.saved_look = {p: getattr(vo, p) for p in ("Transparency", "ShapeAppearance", "DiffuseColor")
+                                if hasattr(vo, p)}
+            self._set(vo, "Transparency", trans)
+        except Exception:
+            pass
+
+    def _restore_transparency(self, t):
+        """Put back the object's own look, per-face colors included."""
+        if t.saved_look is None:
+            return
+        look, t.saved_look = t.saved_look, None
+        try:
+            for prop, value in look.items():
+                setattr(t.obj.ViewObject, prop, value)
+        except Exception:
+            pass
 
     def _release(self, t):
         """Remove a target's background copy and show the original again."""
@@ -2223,6 +2253,7 @@ class _PanelMixin:
         if not doc:
             return
         trans = self.spin_trans.value() if hasattr(self, "spin_trans") else 70
+        self._sync_clip_transparency(use_clip)
         for t in self.targets:
             if use_clip:
                 self._release(t)
@@ -2266,12 +2297,13 @@ class _GeometryMixin:
         """
         offset_val = self.offset_spin.value()
         c = self.bbox.Center
-        if self.radio_yz.isChecked():
-            ptype, n0, u0, w0 = "YZ", App.Vector(1, 0, 0), App.Vector(0, 1, 0), App.Vector(0, 0, 1)
-        elif self.radio_xz.isChecked():
-            ptype, n0, u0, w0 = "XZ", App.Vector(0, 1, 0), App.Vector(1, 0, 0), App.Vector(0, 0, 1)
+        ptype = self.combo_plane.currentText()
+        if ptype == "YZ":
+            n0, u0, w0 = App.Vector(1, 0, 0), App.Vector(0, 1, 0), App.Vector(0, 0, 1)
+        elif ptype == "XZ":
+            n0, u0, w0 = App.Vector(0, 1, 0), App.Vector(1, 0, 0), App.Vector(0, 0, 1)
         else:
-            ptype, n0, u0, w0 = "XY", App.Vector(0, 0, 1), App.Vector(1, 0, 0), App.Vector(0, 1, 0)
+            n0, u0, w0 = App.Vector(0, 0, 1), App.Vector(1, 0, 0), App.Vector(0, 1, 0)
         ta, tb = self.spin_tilt_a.value(), self.spin_tilt_b.value()
         names = {"YZ": ("Y", "Z"), "XZ": ("X", "Z"), "XY": ("X", "Y")}[ptype]
         self.lbl_tilt_a.setText("Tilt %s:" % names[0])
@@ -2987,6 +3019,7 @@ class LiveSectionAnalyzer(_SceneMixin, _PanelMixin, _GeometryMixin, _MeshSection
         self._hatch_idx = {}          # object key -> index into HATCH_STYLES
         self._scene_dirty = False     # a placement / shape changed in the document
         self._observer = None
+        self._doc_name = App.ActiveDocument.Name if App.ActiveDocument else None
         self.init_done = False
 
         if not self._collect_targets():
@@ -3320,6 +3353,7 @@ class LiveSectionAnalyzer(_SceneMixin, _PanelMixin, _GeometryMixin, _MeshSection
 
         # Show the original objects again and remove their copies
         for t in self.targets:
+            self._restore_transparency(t)
             self._release(t)
 
         doc = App.ActiveDocument
@@ -3340,6 +3374,13 @@ class LiveSectionAnalyzer(_SceneMixin, _PanelMixin, _GeometryMixin, _MeshSection
         if self._mode == "task":
             # The Tasks panel owns the form; the unused dock can simply go.
             self.deleteLater()
+
+    def on_document_closed(self):
+        """The sectioned document is going away: the panel has nothing left to show."""
+        self._timer.stop()
+        self._settle_timer.stop()
+        # Not from inside the document's own deletion
+        QTimer.singleShot(0, self.shutdown if self._mode == "task" else self.close)
 
     def closeEvent(self, event):
         """Dock-window close (also used when the macro is started again)"""

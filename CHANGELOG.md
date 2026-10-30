@@ -6,6 +6,10 @@
 - Background, Section Fill, Edge Lines and Hatch start folded.
 - The `Live_*` helper objects no longer appear in the tree view.
 - Hatch spacing goes up to 500 mm (was 20 mm) for big objects; the default stays 3 mm.
+- Transparency now works with Fast GPU clipping too; the objects get their own look back when the panel closes.
+- Offset and the Background options moved into the Section Plane group.
+- The XY / XZ / YZ choice is a drop-down list.
+- The panel closes together with the document it was opened on.
 
 ## 0.7.0 – 2026-10-15
 

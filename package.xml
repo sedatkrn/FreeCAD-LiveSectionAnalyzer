@@ -3,7 +3,7 @@
   <name>LiveSectionAnalyzer</name>
   <description>Interactive, real-time section analysis for FreeCAD: move the section plane with a slider or a 3D gizmo, with GPU clipping, hatch, per-object colors and a fast mesh-based section for large assemblies. Freeze keeps a real-geometry copy.</description>
   <version>0.8.0</version>
-  <date>2026-10-15</date>
+  <date>2026-10-30</date>
   <maintainer email="sedatkuran@gmail.com">Sedat Kuran</maintainer>
   <license file="LICENSE">MIT</license>
   <url type="repository" branch="main">https://github.com/sedatkrn/FreeCAD-LiveSectionAnalyzer</url>

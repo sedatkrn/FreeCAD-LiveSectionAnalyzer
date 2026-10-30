@@ -28,6 +28,7 @@ class LiveSectionAnalyzer(_SceneMixin, _PanelMixin, _GeometryMixin, _MeshSection
         self._hatch_idx = {}          # object key -> index into HATCH_STYLES
         self._scene_dirty = False     # a placement / shape changed in the document
         self._observer = None
+        self._doc_name = App.ActiveDocument.Name if App.ActiveDocument else None
         self.init_done = False
 
         if not self._collect_targets():
@@ -361,6 +362,7 @@ class LiveSectionAnalyzer(_SceneMixin, _PanelMixin, _GeometryMixin, _MeshSection
 
         # Show the original objects again and remove their copies
         for t in self.targets:
+            self._restore_transparency(t)
             self._release(t)
 
         doc = App.ActiveDocument
@@ -381,6 +383,13 @@ class LiveSectionAnalyzer(_SceneMixin, _PanelMixin, _GeometryMixin, _MeshSection
         if self._mode == "task":
             # The Tasks panel owns the form; the unused dock can simply go.
             self.deleteLater()
+
+    def on_document_closed(self):
+        """The sectioned document is going away: the panel has nothing left to show."""
+        self._timer.stop()
+        self._settle_timer.stop()
+        # Not from inside the document's own deletion
+        QTimer.singleShot(0, self.shutdown if self._mode == "task" else self.close)
 
     def closeEvent(self, event):
         """Dock-window close (also used when the macro is started again)"""
